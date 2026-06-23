@@ -1,0 +1,8 @@
+name: web-1
+hostname: web-1
+user: ubuntu
+memory: 1024
+vcpus: 2
+base_image: ubuntu-noble.img
+disk: 10
+network: default
