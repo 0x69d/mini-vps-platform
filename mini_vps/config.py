@@ -1,7 +1,14 @@
+"""リソースの定数と XML テンプレート群。"""
+
 POOL_NAME = "vps-pool"
 POOL_PATH = "/var/lib/libvirt/images/vps-pool"
 BASE_POOL = "images"
 LAB_DIR = "/var/lib/libvirt/images/lab"
+
+# 管理対象 domain の <metadata> に spec を埋め込むための名前空間。
+# URI は単なる一意識別子で、機能上は任意の文字列でよい(プレースホルダ)。
+METADATA_NS = "https://example.org/minivps"
+METADATA_KEY = "minivps"
 POOL_XML = f"""
 <pool type='dir'>
   <name>{POOL_NAME}</name>

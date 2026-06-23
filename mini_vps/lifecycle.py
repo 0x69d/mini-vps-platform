@@ -1,3 +1,5 @@
+"""VM のプロビジョニングと削除。"""
+
 import os
 import time
 
@@ -8,9 +10,17 @@ from .resources import build_domain_xml, build_seed_iso, create_overlay_volume
 from .spec import read_pubkey
 
 
-def provision(conn, spec) -> "libvirt.virDomain":
-    """
-    spec から VM を一気通貫で作る: overlay → seed → domain XML → defineXML → create。Domain を返す。
+def provision(conn, spec) -> libvirt.virDomain:
+    """VM を一気通貫で作成し、起動済みの domain を返す。
+
+    overlay → seed → domain XML → defineXML → create の順に処理する。
+
+    Args:
+        conn: libvirt 接続オブジェクト。
+        spec: VM スペックの dict。
+
+    Returns:
+        起動済みの libvirt.virDomain オブジェクト。
     """
     net = conn.networkLookupByName(spec.get("network", "default"))
 
@@ -25,27 +35,46 @@ def provision(conn, spec) -> "libvirt.virDomain":
     return dom
 
 
-def wait_for_ip(dom: "libvirt.virDomain", timeout=120) -> str | None:
+def _lease_ipv4(dom: libvirt.virDomain) -> str | None:
+    """DHCP リースから IPv4 を1回だけ取得する。
+
+    libvirt が NIC(MAC) に紐づくリースだけを返すため、古いリースを掴まない。
     """
-    dom の DHCP リースを直接引いて IPv4 を返す。タイムアウトで None。
-    libvirt が dom の NIC(MAC) に紐づくリースだけを返すため、古いリースを掴まない。
+    ifaces = dom.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE)
+    for iface in ifaces.values():
+        for addr in iface["addrs"]:
+            if addr["type"] == libvirt.VIR_IP_ADDR_TYPE_IPV4:
+                return addr["addr"]
+    return None
+
+
+def wait_for_ip(dom: libvirt.virDomain, timeout=120) -> str | None:
+    """DHCP リースをポーリングし、IPv4 が確定するまで待つ。
+
+    Args:
+        dom: 対象の libvirt.virDomain。
+        timeout: 最大待機秒数。デフォルトは 120 秒。
+
+    Returns:
+        割り当てられた IPv4 アドレス文字列。タイムアウト時は None。
     """
     start_time = time.time()
     while time.time() - start_time < timeout:
-        ifaces = dom.interfaceAddresses(
-            libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE
-        )
-        for iface in ifaces.values():
-            for addr in iface["addrs"]:
-                if addr["type"] == libvirt.VIR_IP_ADDR_TYPE_IPV4:
-                    return addr["addr"]
+        ip = _lease_ipv4(dom)
+        if ip is not None:
+            return ip
         time.sleep(2)
     return None
 
 
 def teardown(conn, spec) -> None:
-    """
-    spec の VM を後始末: destroy → undefine → overlay を名前指定で削除 → seed 削除。
+    """VM を後始末する。
+
+    destroy → undefine → overlay volume 削除 → seed ISO 削除 の順に処理する。
+
+    Args:
+        conn: libvirt 接続オブジェクト。
+        spec: VM スペックの dict。name キーのみ参照する。
     """
     # domain
     if spec["name"] in {d.name() for d in conn.listAllDomains()}:
