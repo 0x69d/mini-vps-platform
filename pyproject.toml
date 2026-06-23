@@ -8,3 +8,21 @@ dependencies = ["libvirt-python==12.0.0", "pyyaml>=6.0.3"]
 
 [tool.setuptools.package-data]
 mini_vps = ["*.yaml"]
+
+[dependency-groups]
+dev = ["ruff>=0.15.18"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "D"]
+ignore = [
+    "D105", # magic method の docstring は省略可
+    "D107", # __init__ の docstring は省略可
+    "D415", # 日本語句点「。」を ASCII period と同等に扱うため
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
