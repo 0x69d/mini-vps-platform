@@ -62,6 +62,48 @@ def _read_spec(dom) -> dict:
     return yaml.safe_load(ET.fromstring(raw).text)
 
 
+class ServerNotFound(Exception):
+    """指定した name の管理対象 domain が存在しない、または管理対象外であることを表す。
+
+    呼び出し側はこの 1 つの例外を捕捉すれば、libvirt のエラーコードを意識せずに
+    「minivps が知らない name」を扱える(例: ルーターで 404 に変換する)。
+    """
+
+
+def _lookup(conn, name: str):
+    """指定した name の管理対象 domain を返す。
+
+    存在しない、または minivps の管理対象外(metadata 未保有)の場合は
+    ServerNotFound に正規化する。これにより get / status / 将来のルーターが
+    libvirt のエラーコードを直接ハンドルせずに済む。
+
+    Args:
+        conn: libvirt 接続オブジェクト。
+        name: VM 名。
+
+    Returns:
+        管理対象の libvirt.virDomain。
+
+    Raises:
+        ServerNotFound: domain が存在しない、または管理対象外の場合。
+        libvirt.libvirtError: 上記以外の libvirt エラー。
+    """
+    try:
+        dom = conn.lookupByName(name)
+    except libvirt.libvirtError as e:
+        if e.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+            raise ServerNotFound(name) from e
+        raise
+    try:
+        # list() の管理対象フィルタと同じ VIR_ERR_NO_DOMAIN_METADATA を基準にする。
+        dom.metadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, METADATA_NS, 0)
+    except libvirt.libvirtError as e:
+        if e.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN_METADATA:
+            raise ServerNotFound(name) from e
+        raise
+    return dom
+
+
 def _status_of(dom) -> dict:
     """VM の状態と IP のスナップショットを返す(IP は待たない)。"""
     state = dom.state()[0]
@@ -101,8 +143,11 @@ class ServerManager:
 
         Returns:
             spec と status をキーに持つ dict。
+
+        Raises:
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
         """
-        dom = self.conn.lookupByName(name)
+        dom = _lookup(self.conn, name)
         return {"spec": _read_spec(dom), "status": _status_of(dom)}
 
     def list(self) -> list[str]:
@@ -131,8 +176,11 @@ class ServerManager:
 
         Returns:
             state と ip をキーに持つ dict。
+
+        Raises:
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
         """
-        return _status_of(self.conn.lookupByName(name))
+        return _status_of(_lookup(self.conn, name))
 
     def delete(self, name: str) -> None:
         """VM を後始末する。
