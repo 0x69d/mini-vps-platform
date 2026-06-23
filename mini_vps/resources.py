@@ -1,3 +1,5 @@
+"""ストレージプール・volume・ISO・domain XML のリソース生成。"""
+
 import os
 import subprocess
 import tempfile
@@ -16,9 +18,17 @@ from .config import (
 )
 
 
-def ensure_pool(conn, name) -> "libvirt.virStoragePool":
-    """
-    name のプールが無ければ define→build→create→autostart して用意する(冪等)。
+def ensure_pool(conn, name) -> libvirt.virStoragePool:
+    """ストレージプールが無ければ作成して返す(冪等)。
+
+    define → build → create → autostart の順にセットアップする。
+
+    Args:
+        conn: libvirt 接続オブジェクト。
+        name: プール名。
+
+    Returns:
+        アクティブ状態の libvirt.virStoragePool。
     """
     pools = {p.name() for p in conn.listAllStoragePools()}
     if name in pools:
@@ -34,7 +44,17 @@ def ensure_pool(conn, name) -> "libvirt.virStoragePool":
 
 
 def create_overlay_volume(conn, spec) -> str:
-    """base_image を backing にした overlay volume を専用プールに作り、その path を返す。"""
+    """専用プールに overlay volume を作成し、そのパスを返す。
+
+    base image を backing store として使用する。既存の同名 volume は削除して再作成する。
+
+    Args:
+        conn: libvirt 接続オブジェクト。
+        spec: VM スペックの dict。base_image・name・disk キーを参照する。
+
+    Returns:
+        作成した overlay volume のパス文字列。
+    """
     base_pool = conn.storagePoolLookupByName(BASE_POOL)
     base_pool.refresh(0)
     base_path = base_pool.storageVolLookupByName(spec["base_image"]).path()
@@ -52,8 +72,17 @@ def create_overlay_volume(conn, spec) -> str:
 
 
 def build_seed_iso(spec, pubkey) -> str:
-    """
-    spec から #cloud-config/meta-data を組み、cloud-localds で lab/ に seed.iso を作って path を返す。
+    """Seed ISO を生成してパスを返す。
+
+    user-data と meta-data を一時ファイルに書き出し、cloud-localds で
+    {name}-seed.iso を LAB_DIR に生成する。
+
+    Args:
+        spec: VM スペックの dict。
+        pubkey: SSH 公開鍵の文字列。
+
+    Returns:
+        生成した seed ISO のパス文字列。
     """
     user_data = USER_DATA_TEMPLATE.format(
         hostname=spec["hostname"], user=spec["user"], pubkey=pubkey
@@ -78,8 +107,15 @@ def build_seed_iso(spec, pubkey) -> str:
 
 
 def build_domain_xml(spec, overlay_path, seed_path) -> str:
-    """
-    spec + overlay/seed パスから ドメインXML文字列を組んで返す。
+    """Domain XML 文字列を組み立てて返す。
+
+    Args:
+        spec: VM スペックの dict。
+        overlay_path: overlay volume のパス文字列。
+        seed_path: seed ISO のパス文字列。
+
+    Returns:
+        libvirt に渡す domain XML 文字列。
     """
     memory_kib = spec["memory"] * 1024
     xml = DOMAIN_XML_TEMPLATE.format(

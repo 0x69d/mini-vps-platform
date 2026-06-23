@@ -7,6 +7,7 @@ import yaml
 
 
 def load_sample_spec() -> str:
+    """パッケージに同梱した vm-spec.yaml のテキストを返す。"""
     return files("mini_vps").joinpath("vm-spec.yaml").read_text()
 
 
@@ -14,8 +15,13 @@ SAMPLE_SPEC = load_sample_spec()
 
 
 def read_pubkey() -> str:
-    """
-    SSH 公開鍵を ~/.ssh/id_ed25519.pub から読み込んで返す。存在しない場合はエラーにする。
+    """SSH 公開鍵を ~/.ssh/id_ed25519.pub から読み込んで返す。
+
+    Returns:
+        公開鍵の文字列(末尾の改行を除去済み)。
+
+    Raises:
+        FileNotFoundError: 公開鍵ファイルが存在しない場合。
     """
     pubkey_path = pathlib.Path.home() / ".ssh" / "id_ed25519.pub"
     with pubkey_path.open("r") as f:
@@ -24,8 +30,16 @@ def read_pubkey() -> str:
 
 
 def load_spec(text) -> dict:
-    """
-    YAML文字列を dict にして返す。必須キーが無ければ分かるエラーにする。
+    """YAML テキストを解析して VM スペックの dict を返す。
+
+    Args:
+        text: vm-spec.yaml 形式の YAML 文字列。
+
+    Returns:
+        必須キーと省略可能キーのデフォルト値を補完した dict。
+
+    Raises:
+        ValueError: 必須キーが欠けている場合。
     """
     spec = yaml.safe_load(text)
     required_keys = ["name", "memory", "vcpus", "base_image", "disk"]
