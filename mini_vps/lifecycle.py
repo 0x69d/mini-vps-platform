@@ -11,16 +11,17 @@ from .spec import read_pubkey
 
 
 def provision(conn, spec) -> libvirt.virDomain:
-    """VM を一気通貫で作成し、起動済みの domain を返す。
+    """VM を定義し、未起動の domain を返す。
 
-    overlay → seed → domain XML → defineXML → create の順に処理する。
+    overlay → seed → domain XML → defineXML の順に処理する。
+    起動は呼び出し側が行う(起動前に metadata を付与するため)。
 
     Args:
         conn: libvirt 接続オブジェクト。
         spec: VM スペックの dict。
 
     Returns:
-        起動済みの libvirt.virDomain オブジェクト。
+        定義済み(未起動)の libvirt.virDomain オブジェクト。
     """
     net = conn.networkLookupByName(spec.get("network", "default"))
 
@@ -30,9 +31,7 @@ def provision(conn, spec) -> libvirt.virDomain:
     overlay_path = create_overlay_volume(conn, spec)
     seed_path = build_seed_iso(spec, read_pubkey())
     xml = build_domain_xml(spec, overlay_path, seed_path)
-    dom = conn.defineXML(xml)
-    dom.create()
-    return dom
+    return conn.defineXML(xml)
 
 
 def _lease_ipv4(dom: libvirt.virDomain) -> str | None:
