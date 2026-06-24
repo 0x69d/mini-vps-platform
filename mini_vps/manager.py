@@ -28,8 +28,7 @@ def _write_spec(dom, spec: dict) -> None:
     """VM スペックを YAML 化し、dom の <metadata> に書き込む。
 
     ElementTree でテキストノードを組むことで、spec 値の & < > が自動エスケープされる。
-    flags に LIVE|CONFIG を明示するのは、CURRENT(0) では起動中 dom に書いても
-    再起動で spec が消えるため。
+    flags は AFFECT_CONFIG のみ。起動前に書くため、起動時の live が CONFIG を引き継ぐ。
 
     Args:
         dom: 書き込み対象の libvirt.virDomain。
@@ -42,7 +41,7 @@ def _write_spec(dom, spec: dict) -> None:
         ET.tostring(el, encoding="unicode"),
         METADATA_KEY,
         METADATA_NS,
-        libvirt.VIR_DOMAIN_AFFECT_LIVE | libvirt.VIR_DOMAIN_AFFECT_CONFIG,
+        libvirt.VIR_DOMAIN_AFFECT_CONFIG,
     )
 
 
@@ -67,6 +66,14 @@ class ServerNotFound(Exception):
 
     呼び出し側はこの 1 つの例外を捕捉すれば、libvirt のエラーコードを意識せずに
     「minivps が知らない name」を扱える(例: ルーターで 404 に変換する)。
+    """
+
+
+class ServerConflict(Exception):
+    """create() の対象 name が既存実体と相違する(または管理対象外)ことを表す。
+
+    収束ロジックを持たないため相違は fail-loud に拒否する。ServerNotFound と対称で、
+    将来の Web API では PUT /servers/{name} の 409 Conflict に対応づける想定。
     """
 
 
@@ -104,6 +111,53 @@ def _lookup(conn, name: str):
     return dom
 
 
+def _find_domain(conn, name: str):
+    """素の domain を返す。存在しなければ None。
+
+    metadata で絞らず存在のみを見るため、管理対象外の同名 domain も検知でき、
+    create() が既存リソースを巻き込んで破壊する事故を防げる。
+
+    Args:
+        conn: libvirt 接続オブジェクト。
+        name: VM 名。
+
+    Returns:
+        domain が存在すれば libvirt.virDomain、無ければ None。
+
+    Raises:
+        libvirt.libvirtError: VIR_ERR_NO_DOMAIN 以外の libvirt エラー。
+    """
+    try:
+        return conn.lookupByName(name)
+    except libvirt.libvirtError as e:
+        if e.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+            return None
+        raise
+
+
+def _spec_matches(dom, spec: dict) -> bool:
+    """保存済み spec と入力 spec が一致するか判定する。
+
+    管理対象外(metadata 無し)は比較対象が無いため不一致扱い(=拒否)とする。
+
+    Args:
+        dom: 比較対象の libvirt.virDomain。
+        spec: 入力 VM スペックの dict。
+
+    Returns:
+        spec が一致すれば True。
+
+    Raises:
+        libvirt.libvirtError: VIR_ERR_NO_DOMAIN_METADATA 以外の libvirt エラー。
+    """
+    try:
+        return _read_spec(dom) == spec
+    except libvirt.libvirtError as e:
+        if e.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN_METADATA:
+            return False
+        raise
+
+
 def _status_of(dom) -> dict:
     """VM の状態と IP のスナップショットを返す(IP は待たない)。"""
     state = dom.state()[0]
@@ -123,17 +177,38 @@ class ServerManager:
         self.conn = conn
 
     def create(self, spec: dict) -> dict:
-        """VM を作成し、spec を metadata に書き込んでから状態を返す。
+        """VM を宣言的・冪等に作成し、spec と状態を返す。
+
+        既存と spec が一致すれば無変更で現状を返し、相違 or 管理対象外なら破壊せず
+        ServerConflict で拒否する。新規は metadata を起動前に付け、失敗時は teardown で
+        巻き戻して all-or-nothing にする。
 
         Args:
             spec: VM スペックの dict。
 
         Returns:
             spec と status をキーに持つ dict。
+
+        Raises:
+            ServerConflict: 既存と spec が相違、または管理対象外の場合。
         """
-        dom = provision(self.conn, spec)
-        _write_spec(dom, spec)
-        return self.get(spec["name"])
+        name = spec["name"]
+        existing = _find_domain(self.conn, name)
+        if existing is not None:
+            # 一致なら冪等 no-op、相違 or 管理外なら破壊せず拒否
+            if _spec_matches(existing, spec):
+                return self.get(name)
+            raise ServerConflict(name)
+
+        # 新規は起動前に metadata を付け、途中失敗は teardown で巻き戻す
+        try:
+            dom = provision(self.conn, spec)
+            _write_spec(dom, spec)
+            dom.create()
+        except Exception:
+            teardown(self.conn, {"name": name})
+            raise
+        return self.get(name)
 
     def get(self, name: str) -> dict:
         """指定した VM の spec と状態を返す。
