@@ -2,7 +2,7 @@
 
 import libvirt
 
-from .lifecycle import wait_for_ip
+from .lifecycle import teardown, wait_for_ip
 from .manager import ServerManager
 from .spec import SAMPLE_SPEC, load_spec
 
@@ -17,7 +17,7 @@ def main():
     print(f"spec: {spec}")
 
     print("\n=== 0. 前回の残骸を消す ===")
-    mgr.delete(name)
+    teardown(conn, {"name": name})
 
     print("\n=== 1. spec から VM を作成(spec を metadata に埋め込む) ===")
     mgr.create(spec)

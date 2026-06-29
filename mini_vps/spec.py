@@ -1,9 +1,46 @@
-"""VM スペック(宣言的 YAML)の読み込みと、SSH 公開鍵の取得。"""
+"""VM スペックの定義(Pydantic)・YAML 読み込み・SSH 公開鍵の取得。
+
+検証の真実を ServerSpec 1 箇所に集約し、YAML(CLI) と JSON(API) の
+両入口を同じモデルへ収束させる。
+"""
 
 import pathlib
 from importlib.resources import files
 
 import yaml
+from pydantic import BaseModel, model_validator
+
+
+class ServerSpecInput(BaseModel):
+    """name を含まない VM スペック入力。
+
+    API の PUT body(name は URL パスから与える) と、name 以外の共通フィールド
+    定義を兼ねる。
+    """
+
+    memory: int
+    vcpus: int
+    base_image: str
+    disk: int
+    hostname: str | None = None
+    user: str = "ubuntu"
+    network: str = "default"
+
+
+class ServerSpec(ServerSpecInput):
+    """name を含む完全な VM スペック。
+
+    hostname 未指定時は name で補完する(従来の load_spec の挙動を踏襲)。
+    """
+
+    name: str
+
+    @model_validator(mode="after")
+    def _default_hostname(self) -> ServerSpec:
+        """未指定なら name から hostname を補完する。"""
+        if self.hostname is None:
+            self.hostname = self.name
+        return self
 
 
 def load_sample_spec() -> str:
@@ -30,23 +67,17 @@ def read_pubkey() -> str:
 
 
 def load_spec(text) -> dict:
-    """YAML テキストを解析して VM スペックの dict を返す。
+    """YAML テキストを解析し、検証済み VM スペックの dict を返す。
+
+    必須キー検証とデフォルト補完は ServerSpec(Pydantic)に委譲する。
 
     Args:
         text: vm-spec.yaml 形式の YAML 文字列。
 
     Returns:
-        必須キーと省略可能キーのデフォルト値を補完した dict。
+        ServerSpec で正規化した dict。
 
     Raises:
-        ValueError: 必須キーが欠けている場合。
+        pydantic.ValidationError: 必須キー欠落や型不一致の場合。
     """
-    spec = yaml.safe_load(text)
-    required_keys = ["name", "memory", "vcpus", "base_image", "disk"]
-    for key in required_keys:
-        if key not in spec:
-            raise ValueError(f"Missing required key: {key}")
-
-    spec["user"] = spec.get("user", "ubuntu")
-    spec["hostname"] = spec.get("hostname", spec["name"])
-    return spec
+    return ServerSpec(**yaml.safe_load(text)).model_dump()
