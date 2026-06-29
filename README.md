@@ -86,16 +86,37 @@ sudo usermod -aG libvirt "$USER"   # 反映には再ログイン
 ### 3. Python 依存（uv）
 
 ```bash
-uv add pyyaml "libvirt-python==12.0.0"
+uv add pyyaml "libvirt-python==12.0.0" fastapi "uvicorn[standard]"
 ```
 
 `libvirt-python` のバージョンは、実行環境の libvirt と同じかそれ以下に揃える（新しいバインディングを古い `.so` に当てると実行時にシンボル不足になる）。手元のバージョンは `virsh --version` で確認する。
 
-### 4. 実行
+### 4. 実行(デモ)
 
 ```bash
 uv run python -m mini_vps
 ```
+
+### 5. Web API(JSON)
+
+機械(フロント・他サービス)向けの入口。宣言的 YAML は CLI 向け、API は JSON で分離する。
+
+```bash
+uv run uvicorn mini_vps.api:app
+```
+
+OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| `GET` | `/servers` | 管理対象の VM 名一覧 |
+| `GET` | `/servers/{name}` | spec と状態(不在なら 404) |
+| `GET` | `/servers/{name}/status` | 状態 state・ip(不在なら 404) |
+| `PUT` | `/servers/{name}` | 宣言的・冪等な作成/収束(新規 201・冪等 200・spec 相違 409) |
+| `DELETE` | `/servers/{name}` | 削除(成功 204・不在/管理外 404) |
+
+`PUT` は VM を即時に定義・起動して返すが、ブートや DHCP は待たない。IP の確定は
+`GET /servers/{name}/status` を `ip` が出るまでポーリングして観測する。
 
 ## ステータス
 

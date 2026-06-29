@@ -258,9 +258,15 @@ class ServerManager:
         return _status_of(_lookup(self.conn, name))
 
     def delete(self, name: str) -> None:
-        """VM を後始末する。
+        """管理対象の VM を削除する。
+
+        未管理(または不在)の name は削除せず ServerNotFound で拒否する。
 
         Args:
             name: VM 名。
+
+        Raises:
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
         """
+        _lookup(self.conn, name)
         teardown(self.conn, {"name": name})
