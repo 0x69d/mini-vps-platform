@@ -4,6 +4,7 @@ libvirt domain の <metadata> 要素に spec を埋め込むことで、自前 D
 get / list を成立させる。各メソッドは lifecycle の実行部品の薄いラッパー。
 """
 
+import threading
 import xml.etree.ElementTree as ET
 
 import libvirt
@@ -169,46 +170,77 @@ def _status_of(dom) -> dict:
 class ServerManager:
     """VM の作成・取得・一覧・削除を行う管理層。
 
+    create / delete は name 単位ロックで直列化し、同名への並行収束(check-then-act)の
+    TOCTOU を防ぐ。別 name 同士は並行のまま。get / list / status はロックを取らない
+    (libvirt 接続が個々の呼び出し単位でスレッドセーフなため)。create() はロック内で
+    self.get() を呼ぶので、読み取り側にロックを足すと非再帰 Lock で自己デッドロック
+    する点に注意。
+
     Attributes:
         conn: libvirt 接続オブジェクト。
     """
 
     def __init__(self, conn):
         self.conn = conn
+        # name -> Lock。新規 name の Lock 生成自体を _locks_guard で直列化する
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
 
-    def create(self, spec: dict) -> dict:
-        """VM を宣言的・冪等に作成し、spec と状態を返す。
+    def _lock_for(self, name: str) -> threading.Lock:
+        """指定 name 専用の Lock を返す(無ければ生成する)。
+
+        dict.setdefault は CPython では実質アトミックだが、意図を明示するため
+        _locks_guard で囲んで新規 name の Lock 生成を確実に直列化する。
+
+        Args:
+            name: VM 名。
+
+        Returns:
+            その name 専用の threading.Lock。
+        """
+        with self._locks_guard:
+            return self._locks.setdefault(name, threading.Lock())
+
+    def create(self, spec: dict) -> tuple[dict, bool]:
+        """VM を宣言的・冪等に作成し、(spec と状態, 新規作成か) を返す。
 
         既存と spec が一致すれば無変更で現状を返し、相違 or 管理対象外なら破壊せず
         ServerConflict で拒否する。新規は metadata を起動前に付け、失敗時は teardown で
         巻き戻して all-or-nothing にする。
 
+        name 単位ロックで全体を直列化するため、ロック取得後に _find_domain を再評価する
+        (ロック前の判定は信用しない)。同名 overlay volume の delete→再作成
+        (resources.create_overlay_volume)も provision 経由でこのロック内に入るため
+        直列化される。
+
         Args:
             spec: VM スペックの dict。
 
         Returns:
-            spec と status をキーに持つ dict。
+            (result, created) のタプル。result は spec と status をキーに持つ dict。
+            created は新規作成なら True、既存一致の冪等 no-op なら False。
 
         Raises:
             ServerConflict: 既存と spec が相違、または管理対象外の場合。
         """
         name = spec["name"]
-        existing = _find_domain(self.conn, name)
-        if existing is not None:
-            # 一致なら冪等 no-op、相違 or 管理外なら破壊せず拒否
-            if _spec_matches(existing, spec):
-                return self.get(name)
-            raise ServerConflict(name)
+        with self._lock_for(name):
+            existing = _find_domain(self.conn, name)
+            if existing is not None:
+                # 一致なら冪等 no-op、相違 or 管理外なら破壊せず拒否
+                if _spec_matches(existing, spec):
+                    return self.get(name), False
+                raise ServerConflict(name)
 
-        # 新規は起動前に metadata を付け、途中失敗は teardown で巻き戻す
-        try:
-            dom = provision(self.conn, spec)
-            _write_spec(dom, spec)
-            dom.create()
-        except Exception:
-            teardown(self.conn, {"name": name})
-            raise
-        return self.get(name)
+            # 新規は起動前に metadata を付け、途中失敗は teardown で巻き戻す
+            try:
+                dom = provision(self.conn, spec)
+                _write_spec(dom, spec)
+                dom.create()
+            except Exception:
+                teardown(self.conn, {"name": name})
+                raise
+            return self.get(name), True
 
     def get(self, name: str) -> dict:
         """指定した VM の spec と状態を返す。
@@ -268,5 +300,7 @@ class ServerManager:
         Raises:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
         """
-        _lookup(self.conn, name)
-        teardown(self.conn, {"name": name})
+        # create と同じ name ロックで直列化し、作成途中の VM への delete 競合を防ぐ
+        with self._lock_for(name):
+            _lookup(self.conn, name)
+            teardown(self.conn, {"name": name})

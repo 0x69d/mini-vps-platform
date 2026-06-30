@@ -10,6 +10,7 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 - YAML で宣言した「欲しいサーバー」を、libvirt の domain として実体化する。
 - 最終的に Web API として操作できる形まで持っていく。
 - 単一ホスト上でローカル完結させる。実機 VPS との接続は前提としない。
+- 並行制御は単一プロセス前提とし、同名への並行 create/delete は `ServerManager` の name 単位ロックで直列化する（複数 worker / プロセス間ロックは対象外）。
 
 ## スコープ
 

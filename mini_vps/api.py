@@ -19,7 +19,9 @@ async def lifespan(app: FastAPI):
     """起動時に一度だけ libvirt 接続を開き、全リクエストで共有する。
 
     libvirt 接続は内部ロックでスレッドセーフなため、スレッドプールで動く
-    複数ハンドラから単一接続を共有してよい。
+    複数ハンドラから単一接続を共有してよい。ただしそれは個々の API 呼び出しの保証で
+    あり、複数呼び出しにまたがる create/delete の収束のアトミック性は ServerManager の
+    name 単位ロックの責務である。
     """
     conn = libvirt.open("qemu:///system")
     app.state.manager = ServerManager(conn)
@@ -88,15 +90,10 @@ def put_server(
     Returns:
         spec と status をキーに持つ dict。
     """
-    # 新規か既存かを事前判定して 201/200 を出し分ける(相違時は create が 409 を投げる)
-    try:
-        mgr.get(name)
-        created = False
-    except ServerNotFound:
-        created = True
-
+    # 201/200 の判定は create が name ロック内で原子的に行う(created を返す)。
+    # ハンドラ側で事前 get すると並行 2 本が共に created=True になり破綻するため避ける。
     spec = ServerSpec(name=name, **body.model_dump()).model_dump()
-    result = mgr.create(spec)
+    result, created = mgr.create(spec)
     response.status_code = 201 if created else 200
     return result
 
