@@ -6,7 +6,13 @@ import time
 import libvirt
 
 from .config import LAB_DIR, POOL_NAME
-from .resources import build_domain_xml, build_seed_iso, create_overlay_volume
+from .resources import (
+    _filter_name,
+    build_domain_xml,
+    build_nwfilter_xml,
+    build_seed_iso,
+    create_overlay_volume,
+)
 from .spec import read_pubkey
 
 
@@ -25,7 +31,7 @@ def ensure_network_active(conn, spec) -> None:
 def provision(conn, spec) -> libvirt.virDomain:
     """VM を定義し、未起動の domain を返す。
 
-    overlay → seed → domain XML → defineXML の順に処理する。
+    nwfilter(任意) → overlay → seed → domain XML → defineXML の順に処理する。
     起動は呼び出し側が行う(起動前に metadata を付与するため)。
 
     Args:
@@ -37,9 +43,14 @@ def provision(conn, spec) -> libvirt.virDomain:
     """
     ensure_network_active(conn, spec)
 
+    filter_name = None
+    if spec.get("filters") is not None:
+        conn.nwfilterDefineXML(build_nwfilter_xml(spec))
+        filter_name = _filter_name(spec)
+
     overlay_path = create_overlay_volume(conn, spec)
     seed_path = build_seed_iso(spec, read_pubkey())
-    xml = build_domain_xml(spec, overlay_path, seed_path)
+    xml = build_domain_xml(spec, overlay_path, seed_path, filter_name=filter_name)
     return conn.defineXML(xml)
 
 
@@ -78,7 +89,7 @@ def wait_for_ip(dom: libvirt.virDomain, timeout=120) -> str | None:
 def teardown(conn, spec) -> None:
     """VM を後始末する。
 
-    destroy → undefine → overlay volume 削除 → seed ISO 削除 の順に処理する。
+    destroy → undefine → nwfilter 削除 → overlay volume 削除 → seed ISO 削除の順。
 
     Args:
         conn: libvirt 接続オブジェクト。
@@ -90,6 +101,13 @@ def teardown(conn, spec) -> None:
         if dom.isActive():
             dom.destroy()
         dom.undefine()
+
+    # nwfilter は使用中(domain にアタッチ中)は undefine できないため、domain の
+    # undefine 後、かつ domain ブロックとは独立に判定する(provision 内で
+    # nwfilterDefineXML だけ成功し以降が失敗したロールバック経路でも回収できるように)。
+    filter_name = _filter_name(spec)
+    if filter_name in {f.name() for f in conn.listAllNWFilters()}:
+        conn.nwfilterLookupByName(filter_name).undefine()
 
     # overlay volume
     vol_name = f"{spec['name']}.qcow2"

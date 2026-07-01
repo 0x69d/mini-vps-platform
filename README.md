@@ -19,11 +19,13 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 - `Server` リソース: YAML 定義から libvirt domain を生成・起動・停止・削除する。
 - YAML → domain XML への変換層（Python）。
 - NAT ネットワーク: libvirt の仮想ブリッジ経由でゲストを外向き通信させる。
+- パケットフィルタ: `filters` で宣言した inbound ポートのみ許可する(libvirt nwfilter)。
 
 ### 含まないもの
 
 - 複数物理ホストへのスケジューリング。
 - マルチテナンシー、課金、認証などの大規模運用機構。
+- パケットフィルタの IPv6・egress・動的なルール更新 API（inbound・IPv4・作成時適用のみ）。
 
 ## アーキテクチャ
 
@@ -55,6 +57,13 @@ disk: 10                      # GB
 | `hostname` | str | 任意 | 未指定なら `name` で補完 |
 | `user` | str | 任意 | `ubuntu` |
 | `network` | str | 任意 | `default` |
+| `filters` | list[FilterRule] \| null | 任意 | 未指定(null)なら全 inbound 許可。`[]` を明示すると全 inbound 拒否 |
+
+`FilterRule`: `{port: int(1-65535), protocol: "tcp" \| "udp"}` の inbound 許可ルール1件。
+
+> **警告**: `filters` を1件でも宣言すると、明示したポート以外の inbound は SSH(22番)を含めて
+> すべて拒否される。SSH アクセスを維持したい場合は `{port: 22, protocol: "tcp"}` を
+> 自分で `filters` に含める必要がある(暗黙の許可は無い)。
 
 ## 必要環境
 
@@ -67,7 +76,8 @@ disk: 10                      # GB
 
 ### 1. システムパッケージ
 
-`cloud-localds`（cloud-image-utils / cloud-utils）と libvirt 開発ヘッダ（libvirt-python のビルドに必要）まで含める。
+`cloud-localds`（cloud-image-utils / cloud-utils）、libvirt 開発ヘッダ（libvirt-python のビルドに必要）、
+パケットフィルタ（nwfilter）が内部で使う ebtables / iptables / arptables まで含める。
 
 Debian / Ubuntu（apt）:
 
@@ -76,7 +86,8 @@ sudo apt install -y \
   libvirt-daemon-system libvirt-clients \
   qemu-system-x86 qemu-utils \
   cloud-image-utils \
-  libvirt-dev pkg-config build-essential
+  libvirt-dev pkg-config build-essential \
+  ebtables iptables arptables
 ```
 
 Fedora / RHEL 系（dnf）:
@@ -86,7 +97,8 @@ sudo dnf install -y \
   libvirt libvirt-client \
   qemu-kvm qemu-img \
   cloud-utils \
-  libvirt-devel pkgconf-pkg-config gcc
+  libvirt-devel pkgconf-pkg-config gcc \
+  ebtables iptables arptables
 ```
 
 ### 2. libvirt デーモンの起動と権限
@@ -95,6 +107,10 @@ sudo dnf install -y \
 sudo systemctl enable --now libvirtd
 sudo usermod -aG libvirt "$USER"   # 反映には再ログイン
 ```
+
+パケットフィルタ（nwfilter）はホスト側で ebtables/iptables/arptables ルールを操作するが、
+その処理は root 権限で動く libvirtd デーモンが代行する。呼び出し側ユーザー自身が root で
+ある必要はなく、上記の `libvirt` グループ所属で足りる。
 
 ### 3. Python 依存（uv）
 
@@ -130,10 +146,13 @@ OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
 | `POST` | `/servers/{name}/reinstall` | disk を base から作り直して再起動(不在/管理外 404) |
 
 `PUT` は VM を即時に定義・起動して返すが、ブートや DHCP は待たない。IP の確定は
-`GET /servers/{name}/status` を `ip` が出るまでポーリングして観測する。
+`GET /servers/{name}/status` を `ip` が出るまでポーリングして観測する。`filters` を
+指定した場合、nwfilter ルールは domain 定義に組み込む形で IP 確定を待たずに適用される。
+
+`DELETE` は VM 本体に加え、その VM 専用の nwfilter ルールも同時に削除する(孤児ルールは残さない)。
 
 `reinstall` は overlay volume のみを作り直すため spec・metadata・IP アドレス
-(MAC アドレス)は変わらない。別 base image への入れ替えは対象外。
+(MAC アドレス)・nwfilter ルールは変わらない。別 base image への入れ替えは対象外。
 
 ## ステータス
 

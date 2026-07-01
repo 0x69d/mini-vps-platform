@@ -11,6 +11,8 @@ from .config import (
     DOMAIN_XML_TEMPLATE,
     LAB_DIR,
     META_DATA_TEMPLATE,
+    NWFILTER_PORT_RULE_TEMPLATE,
+    NWFILTER_XML_TEMPLATE,
     OVERLAY_VOL_XML_TEMPLATE,
     POOL_NAME,
     POOL_XML,
@@ -107,18 +109,43 @@ def build_seed_iso(spec, pubkey) -> str:
     return seed_path
 
 
-def build_domain_xml(spec, overlay_path, seed_path) -> str:
+def _filter_name(spec) -> str:
+    """VM の name から決定的な nwfilter 名を作る。"""
+    return f"minivps-{spec['name']}"
+
+
+def build_nwfilter_xml(spec) -> str:
+    """spec["filters"] から VM 専用の nwfilter XML を組み立てて返す。
+
+    呼び出し側で spec["filters"] is not None を確認済みであることが前提。
+
+    Args:
+        spec: VM スペックの dict。name・filters キーを参照する。
+
+    Returns:
+        libvirt に渡す nwfilter XML 文字列。
+    """
+    port_rules = "".join(
+        NWFILTER_PORT_RULE_TEMPLATE.format(protocol=f["protocol"], port=f["port"])
+        for f in spec["filters"]
+    )
+    return NWFILTER_XML_TEMPLATE.format(name=_filter_name(spec), port_rules=port_rules)
+
+
+def build_domain_xml(spec, overlay_path, seed_path, filter_name=None) -> str:
     """Domain XML 文字列を組み立てて返す。
 
     Args:
         spec: VM スペックの dict。
         overlay_path: overlay volume のパス文字列。
         seed_path: seed ISO のパス文字列。
+        filter_name: インターフェースに紐づける nwfilter 名。None なら付けない。
 
     Returns:
         libvirt に渡す domain XML 文字列。
     """
     memory_kib = spec["memory"] * 1024
+    filterref = f"<filterref filter='{filter_name}'/>" if filter_name else ""
     xml = DOMAIN_XML_TEMPLATE.format(
         name=spec["name"],
         memory_kib=memory_kib,
@@ -126,5 +153,6 @@ def build_domain_xml(spec, overlay_path, seed_path) -> str:
         overlay_path=overlay_path,
         seed_path=seed_path,
         network=spec.get("network", "default"),
+        filterref=filterref,
     )
     return xml
