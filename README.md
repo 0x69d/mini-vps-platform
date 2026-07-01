@@ -70,13 +70,13 @@ disk: 10                      # GB
 - Linux（KVM 対応 CPU、`/dev/kvm` 利用可）
 - QEMU/KVM, libvirt デーモン
 - [uv](https://docs.astral.sh/uv/)
-- ビルド依存（libvirt-python は PyPI で sdist のみ提供のため、`uv add` 時にソースビルドが走る）: libvirt の開発ヘッダ + pkg-config + C コンパイラ
+- ビルド依存（libvirt-python は PyPI で sdist のみ提供のため、`uv add` 時にソースビルドが走る）: libvirt の開発ヘッダ + Python 開発ヘッダ（`Python.h`）+ pkg-config + C コンパイラ
 
 ## セットアップ
 
 ### 1. システムパッケージ
 
-`cloud-localds`（cloud-image-utils / cloud-utils）、libvirt 開発ヘッダ（libvirt-python のビルドに必要）、
+`cloud-localds`（cloud-image-utils / cloud-utils）、libvirt-python のビルドに必要な開発ヘッダ（libvirt + Python の両方）、
 パケットフィルタ（nwfilter）が内部で使う ebtables / iptables / arptables まで含める。
 
 Debian / Ubuntu（apt）:
@@ -86,7 +86,7 @@ sudo apt install -y \
   libvirt-daemon-system libvirt-clients \
   qemu-system-x86 qemu-utils \
   cloud-image-utils \
-  libvirt-dev pkg-config build-essential \
+  libvirt-dev python3-dev pkg-config build-essential \
   ebtables iptables arptables
 ```
 
@@ -97,7 +97,7 @@ sudo dnf install -y \
   libvirt libvirt-client \
   qemu-kvm qemu-img \
   cloud-utils \
-  libvirt-devel pkgconf-pkg-config gcc \
+  libvirt-devel python3-devel pkgconf-pkg-config gcc \
   ebtables iptables arptables
 ```
 
