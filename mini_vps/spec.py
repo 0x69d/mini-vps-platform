@@ -6,9 +6,17 @@
 
 import pathlib
 from importlib.resources import files
+from typing import Literal
 
 import yaml
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
+
+
+class FilterRule(BaseModel):
+    """inbound 許可ルール1件(単一ポート・単一プロトコル)。"""
+
+    port: int = Field(ge=1, le=65535)
+    protocol: Literal["tcp", "udp"]
 
 
 class ServerSpecInput(BaseModel):
@@ -25,6 +33,8 @@ class ServerSpecInput(BaseModel):
     hostname: str | None = None
     user: str = "ubuntu"
     network: str = "default"
+    # None: フィルタ無し(全許可)。[]: 意図的な全 inbound 拒否。
+    filters: list[FilterRule] | None = None
 
 
 class ServerSpec(ServerSpecInput):

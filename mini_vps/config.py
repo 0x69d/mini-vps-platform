@@ -75,9 +75,37 @@ DOMAIN_XML_TEMPLATE = """
     <interface type='network'>
       <source network='{network}'/>
       <model type='virtio'/>
+      {filterref}
     </interface>
     <serial type='pty'><target port='0'/></serial>
     <console type='pty'><target type='serial' port='0'/></console>
   </devices>
 </domain>
+"""
+
+# 宣言ポート1件分の accept ルール。protocol("tcp"/"udp")に応じてタグ名を差し替える。
+NWFILTER_PORT_RULE_TEMPLATE = """\
+  <rule action='accept' direction='in' priority='500'>
+    <{protocol} dstportstart='{port}'/>
+  </rule>
+"""
+
+# ESTABLISHED,RELATED の accept が無いと、VM 自身が発信した通信(DNS/apt 等)への
+# 応答まで default drop に落ちる。nwfilter は記述順ではなく priority 昇順で評価される
+# ため、default drop には他より大きい priority を明示する必要がある。
+NWFILTER_XML_TEMPLATE = """
+<filter name='{name}' chain='root'>
+  <filterref filter='allow-arp'/>
+  <filterref filter='allow-dhcp'/>
+  <rule action='accept' direction='in' priority='500'>
+    <all state='ESTABLISHED,RELATED'/>
+  </rule>
+{port_rules}\
+  <rule action='accept' direction='out' priority='500'>
+    <all/>
+  </rule>
+  <rule action='drop' direction='in' priority='1000'>
+    <all/>
+  </rule>
+</filter>
 """
