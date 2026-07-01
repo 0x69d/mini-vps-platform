@@ -10,6 +10,18 @@ from .resources import build_domain_xml, build_seed_iso, create_overlay_volume
 from .spec import read_pubkey
 
 
+def ensure_network_active(conn, spec) -> None:
+    """VM スペックが参照する network が非アクティブなら起動する。
+
+    Args:
+        conn: libvirt 接続オブジェクト。
+        spec: VM スペックの dict。network キーを参照する(未指定時は "default")。
+    """
+    net = conn.networkLookupByName(spec.get("network", "default"))
+    if not net.isActive():
+        net.create()
+
+
 def provision(conn, spec) -> libvirt.virDomain:
     """VM を定義し、未起動の domain を返す。
 
@@ -23,10 +35,7 @@ def provision(conn, spec) -> libvirt.virDomain:
     Returns:
         定義済み(未起動)の libvirt.virDomain オブジェクト。
     """
-    net = conn.networkLookupByName(spec.get("network", "default"))
-
-    if not net.isActive():
-        net.create()
+    ensure_network_active(conn, spec)
 
     overlay_path = create_overlay_volume(conn, spec)
     seed_path = build_seed_iso(spec, read_pubkey())
