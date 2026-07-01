@@ -90,18 +90,19 @@ def build_seed_iso(spec, pubkey) -> str:
     meta_data = META_DATA_TEMPLATE.format(name=spec["name"], hostname=spec["hostname"])
     seed_path = f"{LAB_DIR}/{spec['name']}-seed.iso"
 
-    with tempfile.NamedTemporaryFile(mode="w", delete=False) as ud_file:
-        ud_file.write(user_data)
-        ud_file_path = ud_file.name
+    # TemporaryDirectory で囲むことで、cloud-localds が失敗しても
+    # with を抜ける際に一時ファイルが確実に削除される。
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        ud_file_path = os.path.join(tmp_dir, "user-data")
+        md_file_path = os.path.join(tmp_dir, "meta-data")
+        with open(ud_file_path, "w", encoding="utf-8") as ud_file:
+            ud_file.write(user_data)
+        with open(md_file_path, "w", encoding="utf-8") as md_file:
+            md_file.write(meta_data)
 
-    with tempfile.NamedTemporaryFile(mode="w", delete=False) as md_file:
-        md_file.write(meta_data)
-        md_file_path = md_file.name
-
-    subprocess.run(["cloud-localds", seed_path, ud_file_path, md_file_path], check=True)
-
-    os.remove(ud_file_path)
-    os.remove(md_file_path)
+        subprocess.run(
+            ["cloud-localds", seed_path, ud_file_path, md_file_path], check=True
+        )
 
     return seed_path
 
