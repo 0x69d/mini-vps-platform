@@ -23,7 +23,7 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 ### 含まないもの
 
 - 複数物理ホストへのスケジューリング。
-- マルチテナンシー、課金、認証、API 冪等性などの大規模運用機構。
+- マルチテナンシー、課金、認証などの大規模運用機構。
 
 ## アーキテクチャ
 
@@ -39,10 +39,22 @@ spec.yaml  →  parse  →  内部データ構造  →  XML 生成  →  libvirt
 
 ```yaml
 name: web-1
-memory: 4096   # MB
+memory: 1024                  # MB
 vcpus: 2
-disk: 20       # GB
+base_image: ubuntu-noble.img
+disk: 10                      # GB
 ```
+
+| キー | 型 | 必須/任意 | デフォルト |
+|---|---|---|---|
+| `name` | str | 必須（CLI/YAML）。API は URL パスから与える | — |
+| `memory` | int (MB) | 必須 | — |
+| `vcpus` | int | 必須 | — |
+| `base_image` | str | 必須 | — |
+| `disk` | int (GB) | 必須 | — |
+| `hostname` | str | 任意 | 未指定なら `name` で補完 |
+| `user` | str | 任意 | `ubuntu` |
+| `network` | str | 任意 | `default` |
 
 ## 必要環境
 
