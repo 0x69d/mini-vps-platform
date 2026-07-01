@@ -102,3 +102,9 @@ def put_server(
 def delete_server(name: str, mgr: ServerManager = Depends(get_manager)) -> None:
     """管理対象の VM を削除する(不在/管理外なら 404)。"""
     mgr.delete(name)
+
+
+@app.post("/servers/{name}/reinstall")
+def reinstall_server(name: str, mgr: ServerManager = Depends(get_manager)) -> dict:
+    """管理対象の VM の disk を初期化し、同じ spec で再起動する(不在なら 404)。"""
+    return mgr.reinstall(name)

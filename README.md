@@ -127,9 +127,13 @@ OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
 | `GET` | `/servers/{name}/status` | 状態 state・ip(不在なら 404) |
 | `PUT` | `/servers/{name}` | 宣言的・冪等な作成/収束(新規 201・冪等 200・spec 相違 409) |
 | `DELETE` | `/servers/{name}` | 削除(成功 204・不在/管理外 404) |
+| `POST` | `/servers/{name}/reinstall` | disk を base から作り直して再起動(不在/管理外 404) |
 
 `PUT` は VM を即時に定義・起動して返すが、ブートや DHCP は待たない。IP の確定は
 `GET /servers/{name}/status` を `ip` が出るまでポーリングして観測する。
+
+`reinstall` は overlay volume のみを作り直すため spec・metadata・IP アドレス
+(MAC アドレス)は変わらない。別 base image への入れ替えは対象外。
 
 ## ステータス
 

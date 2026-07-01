@@ -11,7 +11,9 @@ import libvirt
 import yaml
 
 from .config import METADATA_KEY, METADATA_NS
-from .lifecycle import _lease_ipv4, provision, teardown
+from .lifecycle import _lease_ipv4, ensure_network_active, provision, teardown
+from .resources import build_seed_iso, create_overlay_volume
+from .spec import read_pubkey
 
 _STATE_NAMES = {
     libvirt.VIR_DOMAIN_NOSTATE: "nostate",
@@ -304,3 +306,34 @@ class ServerManager:
         with self._lock_for(name):
             _lookup(self.conn, name)
             teardown(self.conn, {"name": name})
+
+    def reinstall(self, name: str) -> dict:
+        """管理対象の VM の disk を base から作り直し、同じ spec で再起動する。
+
+        domain 定義(MAC アドレス含む)は変更しないため IP は維持される。失敗時も
+        対象 VM は削除せず、例外をそのまま呼び出し側に伝播させる。
+
+        Args:
+            name: VM 名。
+
+        Returns:
+            spec と status をキーに持つ dict。
+
+        Raises:
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+        """
+        with self._lock_for(name):
+            dom = _lookup(self.conn, name)
+            spec = _read_spec(dom)
+
+            # overlay 再作成(破壊的)より前に seed を作り直す
+            build_seed_iso(spec, read_pubkey())
+
+            if dom.isActive():
+                dom.destroy()
+            create_overlay_volume(self.conn, spec)
+
+            ensure_network_active(self.conn, spec)
+            dom.create()
+
+            return self.get(name)
