@@ -1,5 +1,6 @@
 """リソースの定数と XML テンプレート群。"""
 
+LIBVIRT_URI = "qemu:///system"
 POOL_NAME = "vps-pool"
 POOL_PATH = "/var/lib/libvirt/images/vps-pool"
 BASE_POOL = "images"
