@@ -62,7 +62,7 @@ def test_provision_defines_nwfilter_when_filters_present(monkeypatch):
     build_domain_xml_mock.assert_called_once_with(
         spec, "/overlay.qcow2", "/seed.iso", filter_name="minivps-web-1"
     )
-    conn.defineXML.assert_called_once_with("<domain/>") 
+    conn.defineXML.assert_called_once_with("<domain/>")
 
 
 def test_provision_skips_nwfilter_when_absent(monkeypatch):
