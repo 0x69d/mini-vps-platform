@@ -24,7 +24,7 @@ packages = ["mini_vps"]
 mini_vps = ["*.yaml"]
 
 [dependency-groups]
-dev = ["ruff>=0.15.18", "pytest>=8"]
+dev = ["ruff>=0.15.18", "pytest>=8", "httpx>=0.28"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

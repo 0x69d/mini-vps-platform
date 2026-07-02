@@ -50,9 +50,12 @@ spec(YAML/JSON) → parse → XML → libvirt define/start という一方向の
 
 ## テスト方針
 
-ユニットテストは**外部依存ゼロの純粋関数のみ**を対象にする(`tests/`)。
-実 libvirt 接続・`cloud-localds` サブプロセス・SSH 公開鍵を要する関数(`ensure_pool`・`build_seed_iso`・
-`ServerManager`・`api`)は統合実行が必要なためユニットテストの対象外。
+外部依存ゼロの純粋関数は素の値でテストする(`spec.py` の検証ロジック・`resources.py` の
+`build_domain_xml`/`build_nwfilter_xml`/`_filter_name`)。libvirt 接続・subprocess に依存する関数は
+`unittest.mock`(`MagicMock`/`monkeypatch`)で外部呼び出しを差し替えてユニットテスト化する
+(`manager.py`・`lifecycle.py`・`resources.py` の残り)。`api.py` は `fastapi.testclient.TestClient` +
+`dependency_overrides` で HTTP 層を検証する。実 libvirtd・`cloud-localds` バイナリを要する結合的な
+動作確認は、別途手動または統合実行で行う。
 
 ## 外部依存・前提(統合実行時のみ)
 
