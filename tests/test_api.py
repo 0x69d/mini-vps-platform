@@ -1,0 +1,111 @@
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi.testclient import TestClient
+
+import mini_vps.api as api_module
+from mini_vps.manager import ServerConflict, ServerNotFound
+
+
+@pytest.fixture
+def client(monkeypatch):
+    """ServerManagerをMockに差し替えたTestClientを返す。
+
+    FastAPI標準の TestClient + dependency_overrides の定型パターンなので、
+    他ファイルと異なり fixture として共通化する。lifespan が libvirt.open を
+    呼んでも実接続しないよう合わせて patch する。
+    """
+    mock_manager = MagicMock()
+    monkeypatch.setattr("mini_vps.api.libvirt.open", lambda uri: MagicMock())
+    api_module.app.dependency_overrides[api_module.get_manager] = lambda: mock_manager
+    with TestClient(api_module.app) as test_client:
+        yield test_client, mock_manager
+    api_module.app.dependency_overrides.clear()
+
+
+PUT_BODY = {
+    "memory": 1024,
+    "vcpus": 2,
+    "base_image": "ubuntu-noble.img",
+    "disk": 10,
+}
+
+
+# --- list_servers ---
+
+
+def test_list_servers_returns_manager_list(client):
+    test_client, mock_manager = client
+    mock_manager.list.return_value = ["web-1", "web-2"]
+
+    response = test_client.get("/servers")
+
+    assert response.status_code == 200
+    assert response.json() == {"servers": ["web-1", "web-2"]}
+
+
+# --- get_server ---
+
+
+def test_get_server_returns_404_when_not_found(client):
+    test_client, mock_manager = client
+    mock_manager.get.side_effect = ServerNotFound("web-1")
+
+    response = test_client.get("/servers/web-1")
+
+    assert response.status_code == 404
+
+
+# --- put_server ---
+
+
+def test_put_server_returns_201_when_created(client):
+    test_client, mock_manager = client
+    mock_manager.create.return_value = ({"spec": {}, "status": {}}, True)
+
+    response = test_client.put("/servers/web-1", json=PUT_BODY)
+
+    assert response.status_code == 201
+
+
+def test_put_server_returns_200_when_idempotent(client):
+    test_client, mock_manager = client
+    mock_manager.create.return_value = ({"spec": {}, "status": {}}, False)
+
+    response = test_client.put("/servers/web-1", json=PUT_BODY)
+
+    assert response.status_code == 200
+
+
+def test_put_server_returns_409_on_conflict(client):
+    test_client, mock_manager = client
+    mock_manager.create.side_effect = ServerConflict("web-1")
+
+    response = test_client.put("/servers/web-1", json=PUT_BODY)
+
+    assert response.status_code == 409
+
+
+# --- delete_server ---
+
+
+def test_delete_server_returns_204(client):
+    test_client, mock_manager = client
+
+    response = test_client.delete("/servers/web-1")
+
+    assert response.status_code == 204
+    mock_manager.delete.assert_called_once_with("web-1")
+
+
+# --- reinstall_server ---
+
+
+def test_reinstall_server_returns_200(client):
+    test_client, mock_manager = client
+    mock_manager.reinstall.return_value = {"spec": {}, "status": {}}
+
+    response = test_client.post("/servers/web-1/reinstall")
+
+    assert response.status_code == 200
+    mock_manager.reinstall.assert_called_once_with("web-1")
