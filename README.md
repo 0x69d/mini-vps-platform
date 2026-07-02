@@ -154,6 +154,23 @@ OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
 `reinstall` は overlay volume のみを作り直すため spec・metadata・IP アドレス
 (MAC アドレス)・nwfilter ルールは変わらない。別 base image への入れ替えは対象外。
 
+### 6. Prometheus エクスポーター
+
+管理対象 VM の CPU・メモリ・ネットワーク・ディスク I/O・起動状態を Prometheus 形式で公開する。
+Web API とは別の独立プロセスとして動く。
+
+```bash
+uv run python -m mini_vps.exporter
+```
+
+既定では `127.0.0.1:9177/metrics` で待ち受ける(同一ホスト上で動く Prometheus サーバーからの
+スクレイプを想定。単一ホスト上でローカル完結させるという本プロジェクトの前提に合わせている)。
+`MINIVPS_EXPORTER_PORT`・`MINIVPS_EXPORTER_ADDR` 環境変数でポート・待受アドレスを変更できる。
+認証機構は無いため、待受アドレスを変更して外部公開する場合はファイアウォール等で
+アクセス元を制限すること。
+
+Grafana などのダッシュボード構築は対象外(スクレイプ可能なメトリクスの提供までが範囲)。
+
 ## ステータス
 
 初期開発中。
