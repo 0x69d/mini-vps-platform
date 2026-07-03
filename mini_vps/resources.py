@@ -92,6 +92,13 @@ def build_seed_iso(spec, pubkey) -> str:
     meta_data = META_DATA_TEMPLATE.format(name=spec["name"], hostname=spec["hostname"])
     seed_path = f"{LAB_DIR}/{spec['name']}-seed.iso"
 
+    # libvirt driver は dynamic_ownership=1 が既定のため、一度でも起動した VM の
+    # seed ISO は起動時に libvirt-qemu:kvm へ chown され、実行ユーザーからは
+    # 上書き不可になる。cloud-localds は出力先へ直接書き込むため、生成前に
+    # 既存ファイルを削除しておく(teardown() の seed ISO 削除と同じ前提)。
+    if os.path.exists(seed_path):
+        os.remove(seed_path)
+
     # TemporaryDirectory で囲むことで、cloud-localds が失敗しても
     # with を抜ける際に一時ファイルが確実に削除される。
     with tempfile.TemporaryDirectory() as tmp_dir:

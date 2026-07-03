@@ -187,6 +187,7 @@ def test_build_seed_iso_writes_expected_cloud_init_content(monkeypatch):
         captured["cmd"] = cmd
 
     monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
+    monkeypatch.setattr("mini_vps.resources.os.path.exists", lambda p: False)
 
     spec = _spec(name="web-1", hostname="web-1", user="ubuntu")
     seed_path = build_seed_iso(spec, "ssh-ed25519 AAAA...")
@@ -195,3 +196,25 @@ def test_build_seed_iso_writes_expected_cloud_init_content(monkeypatch):
     assert "ssh-ed25519 AAAA..." in captured["user_data"]
     assert "web-1" in captured["meta_data"]
     assert seed_path == f"{LAB_DIR}/web-1-seed.iso"
+
+
+def test_build_seed_iso_deletes_existing_seed_before_recreate(monkeypatch):
+    monkeypatch.setattr("mini_vps.resources.os.path.exists", lambda p: True)
+    remove_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.resources.os.remove", remove_mock)
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", MagicMock())
+
+    seed_path = build_seed_iso(_spec(name="web-1"), "ssh-ed25519 AAAA...")
+
+    remove_mock.assert_called_once_with(seed_path)
+
+
+def test_build_seed_iso_skips_delete_when_seed_absent(monkeypatch):
+    monkeypatch.setattr("mini_vps.resources.os.path.exists", lambda p: False)
+    remove_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.resources.os.remove", remove_mock)
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", MagicMock())
+
+    build_seed_iso(_spec(name="web-1"), "ssh-ed25519 AAAA...")
+
+    remove_mock.assert_not_called()
