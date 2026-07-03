@@ -14,7 +14,7 @@ from prometheus_client import REGISTRY, start_http_server
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 from .config import LIBVIRT_URI
-from .manager import STATE_NAMES, ServerManager
+from .manager import STATE_NAMES, ServerManager, register_quiet_error_handler
 
 _DEFAULT_PORT = 9177
 _PORT_ENV_VAR = "MINIVPS_EXPORTER_PORT"
@@ -210,6 +210,7 @@ def main() -> None:
     port = int(os.environ.get(_PORT_ENV_VAR, _DEFAULT_PORT))
     addr = os.environ.get(_ADDR_ENV_VAR, _DEFAULT_ADDR)
 
+    register_quiet_error_handler()
     conn = libvirt.open(LIBVIRT_URI)
     mgr = ServerManager(conn)
     REGISTRY.register(DomainCollector(mgr))

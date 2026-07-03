@@ -12,7 +12,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .config import LIBVIRT_URI
-from .manager import ServerConflict, ServerManager, ServerNotFound
+from .manager import (
+    ServerConflict,
+    ServerManager,
+    ServerNotFound,
+    register_quiet_error_handler,
+)
 from .spec import ServerSpec, ServerSpecInput
 from .startup_scripts import StartupScriptError
 
@@ -26,6 +31,7 @@ async def lifespan(app: FastAPI):
     あり、複数呼び出しにまたがる create/delete の収束のアトミック性は ServerManager の
     name 単位ロックの責務である。
     """
+    register_quiet_error_handler()
     conn = libvirt.open(LIBVIRT_URI)
     app.state.manager = ServerManager(conn)
     try:

@@ -15,7 +15,27 @@ from mini_vps.manager import (
     _spec_matches,
     _status_of,
     _write_spec,
+    register_quiet_error_handler,
 )
+
+# --- register_quiet_error_handler ---
+
+
+def test_register_quiet_error_handler_registers_noop_handler(monkeypatch):
+    captured = {}
+
+    def _register(handler, ctx):
+        captured["handler"] = handler
+        captured["ctx"] = ctx
+
+    monkeypatch.setattr(libvirt, "registerErrorHandler", _register)
+
+    register_quiet_error_handler()
+
+    assert captured["ctx"] is None
+    # 登録したハンドラ自体は何もしない(例外を投げない)ことだけを確認する。
+    captured["handler"](None, None)
+
 
 # --- _write_spec / _read_spec ---
 

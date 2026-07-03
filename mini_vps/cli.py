@@ -15,7 +15,12 @@ import yaml
 from pydantic import ValidationError
 
 from .config import LIBVIRT_URI
-from .manager import ServerConflict, ServerManager, ServerNotFound
+from .manager import (
+    ServerConflict,
+    ServerManager,
+    ServerNotFound,
+    register_quiet_error_handler,
+)
 from .spec import load_spec
 from .startup_scripts import StartupScriptError
 
@@ -31,6 +36,7 @@ def _open_manager():
     Yields:
         ServerManager。
     """
+    register_quiet_error_handler()
     conn = libvirt.open(LIBVIRT_URI)
     try:
         yield ServerManager(conn)
