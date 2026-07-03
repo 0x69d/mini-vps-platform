@@ -5,12 +5,14 @@ HTTP ステータスではなく終了コードへ正規化する点のみが ap
 それ以外はどちらも `ServerManager` の薄いラッパーである。
 """
 
-import argparse
 import contextlib
+import functools
 import json
 import sys
+from typing import Annotated
 
 import libvirt
+import typer
 import yaml
 from pydantic import ValidationError
 
@@ -23,6 +25,19 @@ from .manager import (
 )
 from .spec import load_spec
 from .startup_scripts import StartupScriptError
+
+# add_completion=False: 運用ツールにシェル補完は不要なため CLI 表面を減らす。
+app = typer.Typer(add_completion=False)
+
+# create/reinstall で共有する --startup-param オプションの型。
+_StartupParamOption = Annotated[
+    list[str],
+    typer.Option(
+        "--startup-param",
+        metavar="KEY=VALUE",
+        help="startup_script に渡す秘密パラメータ(複数回指定可)",
+    ),
+]
 
 
 @contextlib.contextmanager
@@ -70,119 +85,6 @@ def _parse_startup_params(pairs: list[str]) -> dict[str, str]:
     return secrets
 
 
-def _cmd_create(args: argparse.Namespace, mgr: ServerManager) -> dict:
-    """VM スペックの YAML ファイルから VM を宣言的・冪等に作成する。
-
-    Args:
-        args: spec_file(YAML ファイルパス)と startup_params(--startup-param の
-            リスト)を持つ引数。
-        mgr: 対象の ServerManager。
-
-    Returns:
-        spec と status をキーに持つ dict。
-    """
-    with open(args.spec_file, encoding="utf-8") as f:
-        spec = load_spec(f.read())
-    secrets = _parse_startup_params(args.startup_params)
-    result, _created = mgr.create(spec, secrets=secrets or None)
-    return result
-
-
-def _cmd_get(args: argparse.Namespace, mgr: ServerManager) -> dict:
-    """指定 VM の spec と状態を返す。"""
-    return mgr.get(args.name)
-
-
-def _cmd_list(_args: argparse.Namespace, mgr: ServerManager) -> list[str]:
-    """管理対象の VM 名一覧を返す。"""
-    return mgr.list()
-
-
-def _cmd_status(args: argparse.Namespace, mgr: ServerManager) -> dict:
-    """指定 VM の状態(state, ip)を返す。"""
-    return mgr.status(args.name)
-
-
-def _cmd_delete(args: argparse.Namespace, mgr: ServerManager) -> str:
-    """管理対象の VM を削除する。
-
-    Returns:
-        表示用の完了メッセージ。
-    """
-    mgr.delete(args.name)
-    return f"deleted: {args.name}"
-
-
-def _cmd_reinstall(args: argparse.Namespace, mgr: ServerManager) -> dict:
-    """指定 VM の disk を作り直し、同じ spec で再起動する。
-
-    spec["startup_script"] の秘密情報は metadata に永続化されないため、
-    テンプレートを再度効かせたい場合は --startup-param を渡し直す必要がある。
-    """
-    secrets = _parse_startup_params(args.startup_params)
-    return mgr.reinstall(args.name, secrets=secrets or None)
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    """サブコマンドを定義した ArgumentParser を返す。
-
-    サブコマンドは ServerManager の public メソッドと1対1に対応させ、
-    api.py のエンドポイント構成と対称にする。
-    """
-    parser = argparse.ArgumentParser(
-        prog="mini-vps", description="QEMU/KVM + libvirt 製 VM 制御プレーンの CLI"
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    create = subparsers.add_parser(
-        "create", help="VM スペックの YAML から VM を宣言的に作成する"
-    )
-    create.add_argument("spec_file", help="VM スペックの YAML ファイルパス")
-    create.add_argument(
-        "--startup-param",
-        action="append",
-        default=[],
-        dest="startup_params",
-        metavar="KEY=VALUE",
-        help=(
-            "startup_script に渡す秘密パラメータ(複数回指定可。"
-            "例: --startup-param AI_ENGINE_TOKEN=xxxx)"
-        ),
-    )
-    create.set_defaults(func=_cmd_create)
-
-    get = subparsers.add_parser("get", help="VM の spec と状態を取得する")
-    get.add_argument("name")
-    get.set_defaults(func=_cmd_get)
-
-    list_ = subparsers.add_parser("list", help="管理対象の VM 名一覧を表示する")
-    list_.set_defaults(func=_cmd_list)
-
-    status = subparsers.add_parser("status", help="VM の状態(state, ip)を取得する")
-    status.add_argument("name")
-    status.set_defaults(func=_cmd_status)
-
-    delete = subparsers.add_parser("delete", help="管理対象の VM を削除する")
-    delete.add_argument("name")
-    delete.set_defaults(func=_cmd_delete)
-
-    reinstall = subparsers.add_parser(
-        "reinstall", help="VM の disk を base から作り直して再起動する"
-    )
-    reinstall.add_argument("name")
-    reinstall.add_argument(
-        "--startup-param",
-        action="append",
-        default=[],
-        dest="startup_params",
-        metavar="KEY=VALUE",
-        help="startup_script に渡す秘密パラメータ(複数回指定可)",
-    )
-    reinstall.set_defaults(func=_cmd_reinstall)
-
-    return parser
-
-
 def _print_result(result) -> None:
     """ハンドラの戻り値を種類に応じた形式で標準出力へ書く。
 
@@ -199,11 +101,119 @@ def _print_result(result) -> None:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
+def _handle_errors(func):
+    """コマンド関数を包み、manager.py 由来の例外を終了コードへ正規化する。
+
+    api.py の @app.exception_handler(...) と対称に、業務例外を
+    「HTTP ステータス」ではなく「終了コード」へ変換する。引数不足など
+    純粋な Typer の使用法エラーはここでは扱わず、Typer の既定動作
+    (終了コード2, Usage 表示)に委ねる。
+
+    Args:
+        func: ctx: typer.Context を第一引数に取るコマンド関数。
+
+    Returns:
+        例外捕捉と _print_result による出力整形を行うラップ済み関数。
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            result = func(*args, **kwargs)
+        except ServerNotFound as e:
+            print(f"error: server not found: {e}", file=sys.stderr)
+            raise typer.Exit(code=2) from None
+        except ServerConflict as e:
+            print(f"error: server conflict: {e}", file=sys.stderr)
+            raise typer.Exit(code=3) from None
+        except (ValidationError, yaml.YAMLError, OSError, StartupScriptError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            raise typer.Exit(code=1) from None
+        _print_result(result)
+
+    return wrapper
+
+
+@app.command("create", help="VM スペックの YAML から VM を宣言的に作成する")
+@_handle_errors
+def _cmd_create(
+    ctx: typer.Context,
+    spec_file: Annotated[str, typer.Argument(help="VM スペックの YAML ファイルパス")],
+    startup_param: _StartupParamOption = [],
+) -> dict:
+    """VM スペックの YAML ファイルから VM を宣言的・冪等に作成する。
+
+    Args:
+        ctx: ServerManager を保持する Typer コンテキスト(ctx.obj)。
+        spec_file: VM スペックの YAML ファイルパス。
+        startup_param: --startup-param の KEY=VALUE 文字列のリスト。
+
+    Returns:
+        spec と status をキーに持つ dict。
+    """
+    with open(spec_file, encoding="utf-8") as f:
+        spec = load_spec(f.read())
+    secrets = _parse_startup_params(startup_param)
+    result, _created = ctx.obj.create(spec, secrets=secrets or None)
+    return result
+
+
+@app.command("get", help="VM の spec と状態を取得する")
+@_handle_errors
+def _cmd_get(ctx: typer.Context, name: str) -> dict:
+    """指定 VM の spec と状態を返す。"""
+    return ctx.obj.get(name)
+
+
+@app.command("list", help="管理対象の VM 名一覧を表示する")
+@_handle_errors
+def _cmd_list(ctx: typer.Context) -> list[str]:
+    """管理対象の VM 名一覧を返す。"""
+    return ctx.obj.list()
+
+
+@app.command("status", help="VM の状態(state, ip)を取得する")
+@_handle_errors
+def _cmd_status(ctx: typer.Context, name: str) -> dict:
+    """指定 VM の状態(state, ip)を返す。"""
+    return ctx.obj.status(name)
+
+
+@app.command("delete", help="管理対象の VM を削除する")
+@_handle_errors
+def _cmd_delete(ctx: typer.Context, name: str) -> str:
+    """管理対象の VM を削除する。
+
+    Returns:
+        表示用の完了メッセージ。
+    """
+    ctx.obj.delete(name)
+    return f"deleted: {name}"
+
+
+@app.command("reinstall", help="VM の disk を base から作り直して再起動する")
+@_handle_errors
+def _cmd_reinstall(
+    ctx: typer.Context,
+    name: str,
+    startup_param: _StartupParamOption = [],
+) -> dict:
+    """指定 VM の disk を作り直し、同じ spec で再起動する。
+
+    spec["startup_script"] の秘密情報は metadata に永続化されないため、
+    テンプレートを再度効かせたい場合は --startup-param を渡し直す必要がある。
+    """
+    secrets = _parse_startup_params(startup_param)
+    return ctx.obj.reinstall(name, secrets=secrets or None)
+
+
 def main(argv: list[str] | None = None, manager_factory=None) -> int:
     """CLI のエントリポイント本体。
 
     manager.py の例外を、api.py の exception_handler(HTTP ステータス)と対称に
-    終了コードへ正規化する。
+    終了コードへ正規化する(実処理は各コマンド関数を包む _handle_errors が行う)。
+    Typer は既定(standalone_mode=True)で動作し、内部で sys.exit() する。
+    その SystemExit を捕捉して int の終了コードとして返す。
 
     Args:
         argv: コマンドライン引数。None なら sys.argv から取得する。
@@ -213,26 +223,14 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
 
     Returns:
         プロセス終了コード(成功 0、ServerNotFound 2、ServerConflict 3、
-        spec ファイル関連のエラー 1)。
+        spec ファイル関連のエラー 1、Typer の使用法エラー 2)。
     """
-    parser = _build_parser()
-    args = parser.parse_args(argv)
     factory = manager_factory or _open_manager
-
     with factory() as mgr:
         try:
-            result = args.func(args, mgr)
-        except ServerNotFound as e:
-            print(f"error: server not found: {e}", file=sys.stderr)
-            return 2
-        except ServerConflict as e:
-            print(f"error: server conflict: {e}", file=sys.stderr)
-            return 3
-        except (ValidationError, yaml.YAMLError, OSError, StartupScriptError) as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 1
-
-    _print_result(result)
+            app(args=argv, obj=mgr)
+        except SystemExit as e:
+            return e.code
     return 0
 
 
