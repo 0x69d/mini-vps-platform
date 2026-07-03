@@ -17,6 +17,9 @@ dependencies = [
     "uvicorn[standard]>=0.49.0",
 ]
 
+[project.scripts]
+mini-vps = "mini_vps.cli:run"
+
 [tool.setuptools]
 # フラットレイアウトの自動検出に tests/ を巻き込ませないよう明示する。
 packages = ["mini_vps"]
