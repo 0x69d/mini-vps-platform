@@ -27,6 +27,16 @@ STATE_NAMES = {
 }
 
 
+def register_quiet_error_handler() -> None:
+    """既定の libvirt エラーハンドラを抑制する。
+
+    VIR_ERR_NO_DOMAIN 等を正常系として Python 側で捕捉していても、libvirt は
+    既定で全エラーを無条件に C 層から stderr へ出力する。`libvirt.open()` より前に
+    一度呼び出すことでその出力を抑制する(Python 側の例外処理自体は変更しない)。
+    """
+    libvirt.registerErrorHandler(lambda ctx, err: None, None)
+
+
 def _write_spec(dom, spec: dict) -> None:
     """VM スペックを YAML 化し、dom の <metadata> に書き込む。
 
