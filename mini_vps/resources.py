@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 
 import libvirt
+import yaml
 
 from .config import (
     BASE_POOL,
@@ -16,8 +17,8 @@ from .config import (
     OVERLAY_VOL_XML_TEMPLATE,
     POOL_NAME,
     POOL_XML,
-    USER_DATA_TEMPLATE,
 )
+from .startup_scripts import render_startup_script
 
 
 def ensure_pool(conn, name) -> libvirt.virStoragePool:
@@ -73,7 +74,40 @@ def create_overlay_volume(conn, spec) -> str:
     return pool.createXML(xml, 0).path()
 
 
-def build_seed_iso(spec, pubkey) -> str:
+def _build_user_data(spec, pubkey, secrets: dict[str, str] | None) -> dict:
+    """cloud-config の dict を組み立てる。
+
+    hostname/users は常に含める。spec["startup_script"] が指定されていれば、
+    対応するテンプレートをレンダリングして write_files/runcmd を追加する。
+
+    Args:
+        spec: VM スペックの dict。
+        pubkey: SSH 公開鍵の文字列。
+        secrets: startup_script テンプレートに渡す秘密情報の dict。
+
+    Returns:
+        cloud-config の内容を表す dict(YAML化前)。
+    """
+    data = {
+        "hostname": spec["hostname"],
+        "users": [
+            {
+                "name": spec["user"],
+                "sudo": "ALL=(ALL) NOPASSWD:ALL",
+                "shell": "/bin/bash",
+                "ssh_authorized_keys": [pubkey],
+            }
+        ],
+    }
+    startup_script = spec.get("startup_script")
+    if startup_script:
+        fragment = render_startup_script(startup_script, spec, secrets)
+        data["write_files"] = fragment["write_files"]
+        data["runcmd"] = fragment["runcmd"]
+    return data
+
+
+def build_seed_iso(spec, pubkey, secrets: dict[str, str] | None = None) -> str:
     """Seed ISO を生成してパスを返す。
 
     user-data と meta-data を一時ファイルに書き出し、cloud-localds で
@@ -82,12 +116,14 @@ def build_seed_iso(spec, pubkey) -> str:
     Args:
         spec: VM スペックの dict。
         pubkey: SSH 公開鍵の文字列。
+        secrets: spec["startup_script"] テンプレートに渡す秘密情報の dict。
+            libvirt の metadata には一切書き込まれず、この user-data 生成にのみ使う。
 
     Returns:
         生成した seed ISO のパス文字列。
     """
-    user_data = USER_DATA_TEMPLATE.format(
-        hostname=spec["hostname"], user=spec["user"], pubkey=pubkey
+    user_data = "#cloud-config\n" + yaml.safe_dump(
+        _build_user_data(spec, pubkey, secrets), sort_keys=False
     )
     meta_data = META_DATA_TEMPLATE.format(name=spec["name"], hostname=spec["hostname"])
     seed_path = f"{LAB_DIR}/{spec['name']}-seed.iso"

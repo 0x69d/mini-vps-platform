@@ -33,17 +33,6 @@ OVERLAY_VOL_XML_TEMPLATE = """
 </volume>
 """
 
-USER_DATA_TEMPLATE = """\
-#cloud-config
-hostname: {hostname}
-users:
-  - name: {user}
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    shell: /bin/bash
-    ssh_authorized_keys:
-      - {pubkey}
-"""
-
 META_DATA_TEMPLATE = """\
 instance-id: iid-{name}-001
 local-hostname: {hostname}
@@ -54,6 +43,7 @@ DOMAIN_XML_TEMPLATE = """
   <name>{name}</name>
   <memory unit='KiB'>{memory_kib}</memory>
   <vcpu>{vcpus}</vcpu>
+  <cpu mode='host-model'/>
   <os>
     <type arch='x86_64'>hvm</type>
     <boot dev='hd'/>

@@ -60,6 +60,7 @@ disk: 10                      # GB
 | `user` | str | 任意 | `ubuntu` |
 | `network` | str | 任意 | `default` |
 | `filters` | list[FilterRule] \| null | 任意 | 未指定(null)なら全 inbound 許可。`[]` を明示すると全 inbound 拒否 |
+| `startup_script` | str \| null | 任意 | 未指定(null)。指定する場合は既知のテンプレート名のみ許可([docs/startup-scripts.md](docs/startup-scripts.md) 参照) |
 
 `FilterRule`: `{port: int(1-65535), protocol: "tcp" \| "udp"}` の inbound 許可ルール1件。
 
@@ -67,12 +68,24 @@ disk: 10                      # GB
 > すべて拒否される。SSH アクセスを維持したい場合は `{port: 22, protocol: "tcp"}` を
 > 自分で `filters` に含める必要がある(暗黙の許可は無い)。
 
+## スタートアップスクリプト
+
+名前付き cloud-init テンプレートで VM の初期セットアップを自動化する機能。
+`startup_script` に既知のテンプレート名を指定すると、VM 初回起動時の cloud-init
+(`write_files`/`runcmd`)としてテンプレートの内容が適用される。対応テンプレート・
+secrets の渡し方・トラブルシューティングは [docs/startup-scripts.md](docs/startup-scripts.md)
+を参照。
+
 ## 必要環境
 
 - Linux（KVM 対応 CPU、`/dev/kvm` 利用可）
 - QEMU/KVM, libvirt デーモン
 - [uv](https://docs.astral.sh/uv/)
 - ビルド依存（libvirt-python は PyPI で sdist のみ提供のため、`uv add` 時にソースビルドが走る）: libvirt の開発ヘッダ + Python 開発ヘッダ（`Python.h`）+ pkg-config + C コンパイラ
+
+ゲスト VM の CPU はホストに合わせて選択する(`<cpu mode='host-model'/>`)。未設定だと
+libvirt の既定 CPU モデル(`qemu64`)にフォールバックし、AVX 等の拡張命令が
+ゲストに公開されず、それに依存するソフトウェアがクラッシュすることがある。
 
 ## セットアップ
 
@@ -145,6 +158,10 @@ uv run mini-vps delete web-1
 | `delete <name>` | VM を削除する(不在/管理外なら終了コード 2) |
 | `reinstall <name>` | disk を base から作り直して再起動する(不在なら終了コード 2) |
 
+`create`/`reinstall` はどちらも `--startup-param KEY=VALUE`(複数回指定可)を
+受け付ける。`startup_script` テンプレートに渡す秘密情報の指定方法は
+[docs/startup-scripts.md](docs/startup-scripts.md) を参照。
+
 `create` で spec が既存と相違、または管理外の同名 domain がある場合は終了コード 3
 (`ServerConflict`)で拒否する。CLI は Web API と同じ `ServerManager` を呼ぶ薄い
 フロントエンドで、どちらの入口を使っても操作結果は変わらない。
@@ -176,6 +193,10 @@ OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
 
 `reinstall` は overlay volume のみを作り直すため spec・metadata・IP アドレス
 (MAC アドレス)・nwfilter ルールは変わらない。別 base image への入れ替えは対象外。
+
+`PUT`/`POST .../reinstall` の JSON body には、`startup_script` テンプレートに渡す
+秘密情報として `secrets` フィールドを追加で渡せる。詳細は
+[docs/startup-scripts.md](docs/startup-scripts.md) を参照。
 
 ### 6. Prometheus エクスポーター
 

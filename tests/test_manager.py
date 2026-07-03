@@ -208,6 +208,42 @@ def test_create_rolls_back_on_failure(monkeypatch):
     teardown_mock.assert_called_once_with(conn, {"name": "web-1"})
 
 
+def test_create_forwards_secrets_to_provision(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    secrets = {"AI_ENGINE_TOKEN": "sk-abc"}
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: None)
+    provision_mock = MagicMock(return_value=dom)
+    monkeypatch.setattr("mini_vps.manager.provision", provision_mock)
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    mgr.get = MagicMock(return_value={"spec": {"name": "web-1"}, "status": {}})
+
+    mgr.create({"name": "web-1"}, secrets=secrets)
+
+    provision_mock.assert_called_once_with(conn, {"name": "web-1"}, secrets=secrets)
+
+
+def test_create_never_writes_secrets_into_spec_metadata(monkeypatch):
+    """secrets が _write_spec(→ libvirt metadata)に渡らないことを保証する回帰テスト。"""
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    spec = {"name": "web-1"}
+    secrets = {"AI_ENGINE_TOKEN": "sk-abc"}
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: None)
+    monkeypatch.setattr("mini_vps.manager.provision", MagicMock(return_value=dom))
+    write_spec_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager._write_spec", write_spec_mock)
+    mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
+
+    mgr.create(spec, secrets=secrets)
+
+    # _write_spec に渡る spec は secrets を一切含まない(そのままの spec dict)
+    write_spec_mock.assert_called_once_with(dom, spec)
+    assert "secrets" not in write_spec_mock.call_args[0][1]
+
+
 # --- ServerManager.list ---
 
 
@@ -299,7 +335,7 @@ def test_reinstall_destroys_active_domain_before_recreate(monkeypatch):
 
     dom.destroy.assert_called_once()
     dom.create.assert_called_once()
-    build_seed_mock.assert_called_once_with(spec, "ssh-ed25519 AAAA")
+    build_seed_mock.assert_called_once_with(spec, "ssh-ed25519 AAAA", secrets=None)
     create_overlay_mock.assert_called_once_with(conn, spec)
     ensure_network_mock.assert_called_once_with(conn, spec)
 
@@ -322,3 +358,24 @@ def test_reinstall_skips_destroy_when_inactive(monkeypatch):
 
     dom.destroy.assert_not_called()
     dom.create.assert_called_once()
+
+
+def test_reinstall_forwards_secrets_to_build_seed_iso(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    spec = {"name": "web-1"}
+    secrets = {"AI_ENGINE_TOKEN": "sk-abc"}
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: spec)
+    monkeypatch.setattr("mini_vps.manager.read_pubkey", lambda: "ssh-ed25519 AAAA")
+    build_seed_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager.build_seed_iso", build_seed_mock)
+    monkeypatch.setattr("mini_vps.manager.create_overlay_volume", MagicMock())
+    monkeypatch.setattr("mini_vps.manager.ensure_network_active", MagicMock())
+    mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
+
+    mgr.reinstall("web-1", secrets=secrets)
+
+    build_seed_mock.assert_called_once_with(spec, "ssh-ed25519 AAAA", secrets=secrets)

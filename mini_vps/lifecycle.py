@@ -28,15 +28,18 @@ def ensure_network_active(conn, spec) -> None:
         net.create()
 
 
-def provision(conn, spec) -> libvirt.virDomain:
+def provision(conn, spec, secrets: dict[str, str] | None = None) -> libvirt.virDomain:
     """VM を定義し、未起動の domain を返す。
 
-    nwfilter(任意) → overlay → seed → domain XML → defineXML の順に処理する。
-    起動は呼び出し側が行う(起動前に metadata を付与するため)。
+    nwfilter(任意) → seed → overlay → domain XML → defineXML の順に処理する。
+    起動は呼び出し側が行う(起動前に metadata を付与するため)。seed を overlay
+    より先に作るのは、secrets 不足を安価に検知するため。
 
     Args:
         conn: libvirt 接続オブジェクト。
         spec: VM スペックの dict。
+        secrets: spec["startup_script"] テンプレートに渡す秘密情報の dict。
+            libvirt の metadata には一切書き込まれない。
 
     Returns:
         定義済み(未起動)の libvirt.virDomain オブジェクト。
@@ -48,8 +51,8 @@ def provision(conn, spec) -> libvirt.virDomain:
         conn.nwfilterDefineXML(build_nwfilter_xml(spec))
         filter_name = _filter_name(spec)
 
+    seed_path = build_seed_iso(spec, read_pubkey(), secrets=secrets)
     overlay_path = create_overlay_volume(conn, spec)
-    seed_path = build_seed_iso(spec, read_pubkey())
     xml = build_domain_xml(spec, overlay_path, seed_path, filter_name=filter_name)
     return conn.defineXML(xml)
 

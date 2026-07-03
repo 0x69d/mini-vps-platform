@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from .config import LIBVIRT_URI
 from .manager import ServerConflict, ServerManager, ServerNotFound
 from .spec import load_spec
+from .startup_scripts import StartupScriptError
 
 
 @contextlib.contextmanager
@@ -37,11 +38,38 @@ def _open_manager():
         conn.close()
 
 
+def _parse_startup_params(pairs: list[str]) -> dict[str, str]:
+    """--startup-param の KEY=VALUE 文字列のリストを dict に変換する。
+
+    値側に "=" を含みうる(base64 トークン等)ため、str.split ではなく
+    先頭の1つだけ分割する str.partition を使う。
+
+    Args:
+        pairs: "KEY=VALUE" 形式の文字列のリスト。
+
+    Returns:
+        変換した secrets の dict。
+
+    Raises:
+        StartupScriptError: "KEY=VALUE" 形式でない要素がある場合。
+    """
+    secrets: dict[str, str] = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep:
+            raise StartupScriptError(
+                f"invalid --startup-param (expected KEY=VALUE): {pair!r}"
+            )
+        secrets[key] = value
+    return secrets
+
+
 def _cmd_create(args: argparse.Namespace, mgr: ServerManager) -> dict:
     """VM スペックの YAML ファイルから VM を宣言的・冪等に作成する。
 
     Args:
-        args: spec_file(YAML ファイルパス)を持つ引数。
+        args: spec_file(YAML ファイルパス)と startup_params(--startup-param の
+            リスト)を持つ引数。
         mgr: 対象の ServerManager。
 
     Returns:
@@ -49,7 +77,8 @@ def _cmd_create(args: argparse.Namespace, mgr: ServerManager) -> dict:
     """
     with open(args.spec_file, encoding="utf-8") as f:
         spec = load_spec(f.read())
-    result, _created = mgr.create(spec)
+    secrets = _parse_startup_params(args.startup_params)
+    result, _created = mgr.create(spec, secrets=secrets or None)
     return result
 
 
@@ -79,8 +108,13 @@ def _cmd_delete(args: argparse.Namespace, mgr: ServerManager) -> str:
 
 
 def _cmd_reinstall(args: argparse.Namespace, mgr: ServerManager) -> dict:
-    """指定 VM の disk を作り直し、同じ spec で再起動する。"""
-    return mgr.reinstall(args.name)
+    """指定 VM の disk を作り直し、同じ spec で再起動する。
+
+    spec["startup_script"] の秘密情報は metadata に永続化されないため、
+    テンプレートを再度効かせたい場合は --startup-param を渡し直す必要がある。
+    """
+    secrets = _parse_startup_params(args.startup_params)
+    return mgr.reinstall(args.name, secrets=secrets or None)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -98,6 +132,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "create", help="VM スペックの YAML から VM を宣言的に作成する"
     )
     create.add_argument("spec_file", help="VM スペックの YAML ファイルパス")
+    create.add_argument(
+        "--startup-param",
+        action="append",
+        default=[],
+        dest="startup_params",
+        metavar="KEY=VALUE",
+        help=(
+            "startup_script に渡す秘密パラメータ(複数回指定可。"
+            "例: --startup-param AI_ENGINE_TOKEN=xxxx)"
+        ),
+    )
     create.set_defaults(func=_cmd_create)
 
     get = subparsers.add_parser("get", help="VM の spec と状態を取得する")
@@ -119,6 +164,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "reinstall", help="VM の disk を base から作り直して再起動する"
     )
     reinstall.add_argument("name")
+    reinstall.add_argument(
+        "--startup-param",
+        action="append",
+        default=[],
+        dest="startup_params",
+        metavar="KEY=VALUE",
+        help="startup_script に渡す秘密パラメータ(複数回指定可)",
+    )
     reinstall.set_defaults(func=_cmd_reinstall)
 
     return parser
@@ -169,7 +222,7 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
         except ServerConflict as e:
             print(f"error: server conflict: {e}", file=sys.stderr)
             return 3
-        except (ValidationError, yaml.YAMLError, OSError) as e:
+        except (ValidationError, yaml.YAMLError, OSError, StartupScriptError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
 

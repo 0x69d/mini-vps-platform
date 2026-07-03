@@ -11,6 +11,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from .startup_scripts import STARTUP_SCRIPT_NAMES
+
 
 class FilterRule(BaseModel):
     """inbound 許可ルール1件(単一ポート・単一プロトコル)。"""
@@ -35,6 +37,22 @@ class ServerSpecInput(BaseModel):
     network: str = "default"
     # None: フィルタ無し(全許可)。[]: 意図的な全 inbound 拒否。
     filters: list[FilterRule] | None = None
+    # 初回起動時に適用する cloud-init テンプレート名。非秘匿のため metadata への
+    # 永続化を許容する(秘密情報は別途 secrets 引数で渡し、ここには含めない)。
+    startup_script: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_startup_script(self) -> ServerSpecInput:
+        """startup_script が既知のテンプレート名であることを検証する。"""
+        if (
+            self.startup_script is not None
+            and self.startup_script not in STARTUP_SCRIPT_NAMES
+        ):
+            raise ValueError(
+                f"unknown startup_script: {self.startup_script!r} "
+                f"(known: {sorted(STARTUP_SCRIPT_NAMES)})"
+            )
+        return self
 
 
 class ServerSpec(ServerSpecInput):
