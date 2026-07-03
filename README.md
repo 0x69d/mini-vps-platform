@@ -20,12 +20,14 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 - YAML → domain XML への変換層（Python）。
 - NAT ネットワーク: libvirt の仮想ブリッジ経由でゲストを外向き通信させる。
 - パケットフィルタ: `filters` で宣言した inbound ポートのみ許可する(libvirt nwfilter)。
+- 監視: Prometheus + Grafana によるメトリクス可視化(docker-compose、単一ホスト内完結、外部非公開)。
 
 ### 含まないもの
 
 - 複数物理ホストへのスケジューリング。
 - マルチテナンシー、課金、認証などの大規模運用機構。
 - パケットフィルタの IPv6・egress・動的なルール更新 API（inbound・IPv4・作成時適用のみ）。
+- アラート通知(Alertmanager 等)。可視化までが範囲。
 
 ## アーキテクチャ
 
@@ -169,7 +171,32 @@ uv run python -m mini_vps.exporter
 認証機構は無いため、待受アドレスを変更して外部公開する場合はファイアウォール等で
 アクセス元を制限すること。
 
-Grafana などのダッシュボード構築は対象外(スクレイプ可能なメトリクスの提供までが範囲)。
+メトリクスの可視化(Prometheus + Grafana)は `### 7. Prometheus + Grafana(docker-compose)` を参照。
+
+### 7. Prometheus + Grafana(docker-compose)
+
+`### 6.` の exporter が公開するメトリクスを Prometheus でスクレイプし、Grafana で
+可視化する。Docker(docker compose v2 プラグイン込み)が導入済みであること、
+`### 6.` の exporter が `127.0.0.1:9177` で起動済みであることが前提。
+
+```bash
+uv run python -m mini_vps.exporter &   # 別ターミナルで起動していれば不要
+cp .env.example .env                   # GF_SECURITY_ADMIN_PASSWORD を書き換えること
+docker compose up -d
+```
+
+- Prometheus UI: <http://127.0.0.1:9090>
+- Grafana: <http://127.0.0.1:3000>(ログイン情報は `.env` の
+  `GF_SECURITY_ADMIN_USER`/`GF_SECURITY_ADMIN_PASSWORD`)。ログイン後、
+  「mini-vps-platform」フォルダの「mini-vps-platform Overview」ダッシュボードで
+  VM ごとの CPU・メモリ・ネットワーク・ディスク I/O・起動状態を確認できる。
+
+Prometheus・Grafana とも `network_mode: host` で動作し、`127.0.0.1` にのみ bind する
+(exporter と同じく単一ホスト内で完結させ、外部には公開しない)。動作確認は主に
+ネイティブ Linux ホストを想定しており、WSL2 上では可能な範囲での確認に留まる。
+
+停止する場合は `docker compose down`(データは named volume に残る)。データも含めて
+完全に削除する場合は `docker compose down -v` を使う。
 
 ## ステータス
 
