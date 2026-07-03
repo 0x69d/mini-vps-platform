@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: minivps
+    orgId: 1
+    folder: "mini-vps-platform"
+    type: file
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/dashboards

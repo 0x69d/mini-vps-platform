@@ -1,0 +1,221 @@
+{
+  "id": null,
+  "uid": "minivps-overview",
+  "title": "mini-vps-platform Overview",
+  "tags": ["mini-vps-platform"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "vm",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(minivps_vm_up, vm)", "refId": "vm-variable" },
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    { "id": 1, "type": "row", "title": "Overview", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "panels": [] },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "VM起動状態",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_vm_up{vm=~\"$vm\"}", "legendFormat": "{{vm}}", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "停止中", "color": "red" }, "1": { "text": "稼働中", "color": "green" } } }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "稼働VM数 / 対象VM数",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "count(minivps_vm_up{vm=~\"$vm\"} == 1)", "legendFormat": "稼働中", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "count(minivps_vm_up{vm=~\"$vm\"})", "legendFormat": "対象", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Exporterスクレイプ状態",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "up{job=\"minivps\"}", "legendFormat": "exporter", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "state-timeline",
+      "title": "VM状態タイムライン",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_vm_state{vm=~\"$vm\"} == 1", "legendFormat": "{{vm}}: {{state}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+    },
+
+    { "id": 10, "type": "row", "title": "CPU", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 11 }, "panels": [] },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "CPU使用率(コア数換算)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(minivps_vm_cpu_seconds_total{vm=~\"$vm\"}[5m])", "legendFormat": "{{vm}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "CPU使用率(vCPU比)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(minivps_vm_cpu_seconds_total{vm=~\"$vm\"}[5m]) / on(vm) minivps_vm_vcpus{vm=~\"$vm\"}", "legendFormat": "{{vm}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "vCPU数",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_vm_vcpus{vm=~\"$vm\"}", "legendFormat": "{{vm}}", "format": "table", "instant": true, "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+    },
+
+    { "id": 20, "type": "row", "title": "メモリ", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 }, "panels": [] },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "メモリ使用量(current / maximum)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_vm_memory_current_bytes{vm=~\"$vm\"}", "legendFormat": "{{vm}}-current", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_vm_memory_maximum_bytes{vm=~\"$vm\"}", "legendFormat": "{{vm}}-maximum", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "メモリ使用率",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_vm_memory_current_bytes{vm=~\"$vm\"} / minivps_vm_memory_maximum_bytes{vm=~\"$vm\"}", "legendFormat": "{{vm}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
+    },
+
+    { "id": 30, "type": "row", "title": "ネットワーク", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 }, "panels": [] },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "受信スループット",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(minivps_vm_network_receive_bytes_total{vm=~\"$vm\"}[5m]) * 8", "legendFormat": "{{vm}}-{{device}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bps" }, "overrides": [] }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "送信スループット",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(minivps_vm_network_transmit_bytes_total{vm=~\"$vm\"}[5m]) * 8", "legendFormat": "{{vm}}-{{device}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bps" }, "overrides": [] }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "パケットレート",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 44 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(minivps_vm_network_receive_packets_total{vm=~\"$vm\"}[5m])", "legendFormat": "{{vm}}-{{device}}-rx", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(minivps_vm_network_transmit_packets_total{vm=~\"$vm\"}[5m])", "legendFormat": "{{vm}}-{{device}}-tx", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+    },
+
+    { "id": 40, "type": "row", "title": "ディスクI/O", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 52 }, "panels": [] },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "読み込みスループット",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 53 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(minivps_vm_disk_read_bytes_total{vm=~\"$vm\"}[5m])", "legendFormat": "{{vm}}-{{device}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] }
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "書き込みスループット",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 53 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(minivps_vm_disk_write_bytes_total{vm=~\"$vm\"}[5m])", "legendFormat": "{{vm}}-{{device}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] }
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "IOPS",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 61 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(minivps_vm_disk_read_requests_total{vm=~\"$vm\"}[5m])", "legendFormat": "{{vm}}-{{device}}-read", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(minivps_vm_disk_write_requests_total{vm=~\"$vm\"}[5m])", "legendFormat": "{{vm}}-{{device}}-write", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+    }
+  ]
+}
