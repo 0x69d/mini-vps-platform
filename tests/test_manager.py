@@ -9,6 +9,7 @@ from mini_vps.manager import (
     ServerManager,
     ServerNotFound,
     _find_domain,
+    _is_managed,
     _lookup,
     _read_spec,
     _spec_matches,
@@ -222,6 +223,24 @@ def test_list_filters_unmanaged_domains():
     mgr = ServerManager(conn)
 
     assert mgr.list() == ["web-1"]
+
+
+# --- _is_managed / ServerManager.is_managed ---
+
+
+def test_is_managed_true_when_metadata_present():
+    dom = MagicMock()
+
+    assert _is_managed(dom) is True
+    assert ServerManager(MagicMock()).is_managed(dom) is True
+
+
+def test_is_managed_false_when_metadata_missing():
+    dom = MagicMock()
+    dom.metadata.side_effect = make_libvirt_error(libvirt.VIR_ERR_NO_DOMAIN_METADATA)
+
+    assert _is_managed(dom) is False
+    assert ServerManager(MagicMock()).is_managed(dom) is False
 
 
 # --- ServerManager.delete ---

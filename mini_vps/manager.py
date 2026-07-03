@@ -15,7 +15,7 @@ from .lifecycle import _lease_ipv4, ensure_network_active, provision, teardown
 from .resources import build_seed_iso, create_overlay_volume
 from .spec import read_pubkey
 
-_STATE_NAMES = {
+STATE_NAMES = {
     libvirt.VIR_DOMAIN_NOSTATE: "nostate",
     libvirt.VIR_DOMAIN_RUNNING: "running",
     libvirt.VIR_DOMAIN_BLOCKED: "blocked",
@@ -138,6 +138,27 @@ def _find_domain(conn, name: str):
         raise
 
 
+def _is_managed(dom) -> bool:
+    """指定した domain が minivps の管理対象(spec metadata を保有)か判定する。
+
+    Args:
+        dom: 判定対象の libvirt.virDomain。
+
+    Returns:
+        管理対象なら True。
+
+    Raises:
+        libvirt.libvirtError: VIR_ERR_NO_DOMAIN_METADATA 以外の libvirt エラー。
+    """
+    try:
+        dom.metadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, METADATA_NS, 0)
+    except libvirt.libvirtError as e:
+        if e.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN_METADATA:
+            return False
+        raise
+    return True
+
+
 def _spec_matches(dom, spec: dict) -> bool:
     """保存済み spec と入力 spec が一致するか判定する。
 
@@ -166,7 +187,7 @@ def _status_of(dom) -> dict:
     state = dom.state()[0]
     # 起動中のときだけリースを引く。それ以外は IP 未確定とみなす
     ip = _lease_ipv4(dom) if state == libvirt.VIR_DOMAIN_RUNNING else None
-    return {"state": _STATE_NAMES.get(state, "unknown"), "ip": ip}
+    return {"state": STATE_NAMES.get(state, "unknown"), "ip": ip}
 
 
 class ServerManager:
@@ -265,17 +286,21 @@ class ServerManager:
         Returns:
             minivps 名前空間の metadata を持つ domain 名のリスト。
         """
-        out = []
-        for dom in self.conn.listAllDomains():
-            try:
-                dom.metadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, METADATA_NS, 0)
-            except libvirt.libvirtError as e:
-                # metadata 未保有 = 管理対象外。それ以外のエラーは握りつぶさない
-                if e.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN_METADATA:
-                    continue
-                raise
-            out.append(dom.name())
-        return out
+        return [dom.name() for dom in self.conn.listAllDomains() if _is_managed(dom)]
+
+    def is_managed(self, dom) -> bool:
+        """指定した domain が管理対象かを判定する。
+
+        `getAllDomainStats()` のようにすでに domain オブジェクトを持っている
+        呼び出し元が、`list()` と同じ判定基準で1件ずつ絞り込むために使う。
+
+        Args:
+            dom: 判定対象の libvirt.virDomain。
+
+        Returns:
+            管理対象なら True。
+        """
+        return _is_managed(dom)
 
     def status(self, name: str) -> dict:
         """指定した VM の現在の状態を返す。

@@ -56,6 +56,17 @@ def test_parse_domain_stats_running_includes_all_fields():
     ]
 
 
+def test_parse_domain_stats_missing_device_name_falls_back_to_index():
+    raw = dict(RAW_RUNNING)
+    del raw["net.0.name"]
+    del raw["block.0.name"]
+
+    parsed = _parse_domain_stats(raw)
+
+    assert parsed["interfaces"][0]["name"] == "net0"
+    assert parsed["disks"][0]["name"] == "block0"
+
+
 def test_parse_domain_stats_shutoff_has_no_resource_fields():
     raw = {"state.state": libvirt.VIR_DOMAIN_SHUTOFF, "state.reason": 1}
 
@@ -76,11 +87,11 @@ def test_parse_domain_stats_shutoff_has_no_resource_fields():
 
 def test_collect_only_includes_managed_domains():
     mgr = MagicMock()
-    mgr.list.return_value = ["web-1"]
     managed_dom = MagicMock()
     managed_dom.name.return_value = "web-1"
     unmanaged_dom = MagicMock()
     unmanaged_dom.name.return_value = "other-1"
+    mgr.is_managed.side_effect = lambda dom: dom is managed_dom
     mgr.conn.getAllDomainStats.return_value = [
         (managed_dom, dict(RAW_RUNNING)),
         (unmanaged_dom, dict(RAW_RUNNING)),
@@ -94,7 +105,7 @@ def test_collect_only_includes_managed_domains():
 
 def test_collect_emits_one_hot_state():
     mgr = MagicMock()
-    mgr.list.return_value = ["web-1"]
+    mgr.is_managed.return_value = True
     dom = MagicMock()
     dom.name.return_value = "web-1"
     mgr.conn.getAllDomainStats.return_value = [
@@ -114,7 +125,7 @@ def test_collect_emits_one_hot_state():
 
 def test_collect_skips_resource_metrics_when_shutoff():
     mgr = MagicMock()
-    mgr.list.return_value = ["web-1"]
+    mgr.is_managed.return_value = True
     dom = MagicMock()
     dom.name.return_value = "web-1"
     mgr.conn.getAllDomainStats.return_value = [
@@ -130,7 +141,7 @@ def test_collect_skips_resource_metrics_when_shutoff():
 
 def test_collect_emits_metrics_per_device():
     mgr = MagicMock()
-    mgr.list.return_value = ["web-1"]
+    mgr.is_managed.return_value = True
     dom = MagicMock()
     dom.name.return_value = "web-1"
     raw = dict(RAW_RUNNING)

@@ -14,7 +14,7 @@ from prometheus_client import REGISTRY, start_http_server
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 from .config import LIBVIRT_URI
-from .manager import _STATE_NAMES, ServerManager
+from .manager import STATE_NAMES, ServerManager
 
 _DEFAULT_PORT = 9177
 _PORT_ENV_VAR = "MINIVPS_EXPORTER_PORT"
@@ -44,7 +44,7 @@ def _parse_domain_stats(raw: dict) -> dict:
 
     interfaces = [
         {
-            "name": raw[f"net.{i}.name"],
+            "name": raw.get(f"net.{i}.name", f"net{i}"),
             "rx_bytes": raw.get(f"net.{i}.rx.bytes", 0),
             "rx_packets": raw.get(f"net.{i}.rx.pkts", 0),
             "tx_bytes": raw.get(f"net.{i}.tx.bytes", 0),
@@ -54,7 +54,7 @@ def _parse_domain_stats(raw: dict) -> dict:
     ]
     disks = [
         {
-            "name": raw[f"block.{i}.name"],
+            "name": raw.get(f"block.{i}.name", f"block{i}"),
             "rd_bytes": raw.get(f"block.{i}.rd.bytes", 0),
             "rd_reqs": raw.get(f"block.{i}.rd.reqs", 0),
             "wr_bytes": raw.get(f"block.{i}.wr.bytes", 0),
@@ -64,7 +64,7 @@ def _parse_domain_stats(raw: dict) -> dict:
     ]
 
     return {
-        "state": _STATE_NAMES.get(state_code, "unknown"),
+        "state": STATE_NAMES.get(state_code, "unknown"),
         "is_running": state_code == libvirt.VIR_DOMAIN_RUNNING,
         "cpu_time_seconds": cpu_time_ns / 1e9 if cpu_time_ns is not None else None,
         "memory_current_bytes": (
@@ -88,14 +88,13 @@ class DomainCollector:
     def collect(self):
         """管理対象 VM ごとのメトリクスファミリーを生成する。
 
-        「どの domain が管理対象か」の判定は ServerManager.list() に一元化し、
-        getAllDomainStats() の結果はそのフィルタに通すだけに留める。
+        「どの domain が管理対象か」の判定は ServerManager.is_managed() に一元化し、
+        getAllDomainStats() の結果を domain ごとに直接フィルタする(list() による
+        事前の全件列挙を挟まないことで、二重列挙とその間の TOCTOU を避ける)。
 
         Yields:
             prometheus_client の MetricFamily。
         """
-        managed = set(self._mgr.list())
-
         up = GaugeMetricFamily(
             "minivps_vm_up", "1 if the VM is running, 0 otherwise", labels=["vm"]
         )
@@ -158,14 +157,14 @@ class DomainCollector:
         )
 
         for dom, raw in self._mgr.conn.getAllDomainStats():
-            name = dom.name()
-            if name not in managed:
+            if not self._mgr.is_managed(dom):
                 continue
+            name = dom.name()
 
             parsed = _parse_domain_stats(raw)
 
             up.add_metric([name], 1.0 if parsed["is_running"] else 0.0)
-            for state_name in _STATE_NAMES.values():
+            for state_name in STATE_NAMES.values():
                 state.add_metric(
                     [name, state_name], 1.0 if state_name == parsed["state"] else 0.0
                 )
