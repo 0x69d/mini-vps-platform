@@ -1,6 +1,9 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+import yaml
+
 from mini_vps.config import LAB_DIR, POOL_NAME
 from mini_vps.resources import (
     _filter_name,
@@ -10,6 +13,7 @@ from mini_vps.resources import (
     create_overlay_volume,
     ensure_pool,
 )
+from mini_vps.startup_scripts import StartupScriptError
 
 
 def _spec(**overrides):
@@ -86,6 +90,11 @@ def test_build_domain_xml_with_filter_adds_filterref():
         _spec(), "/overlay.qcow2", "/seed.iso", filter_name="minivps-web-1"
     )
     assert "<filterref filter='minivps-web-1'/>" in xml
+
+
+def test_build_domain_xml_passes_through_host_cpu_features():
+    xml = build_domain_xml(_spec(), "/overlay.qcow2", "/seed.iso")
+    assert "<cpu mode='host-model'/>" in xml
 
 
 def test_build_domain_xml_defaults_network_when_absent():
@@ -218,3 +227,55 @@ def test_build_seed_iso_skips_delete_when_seed_absent(monkeypatch):
     build_seed_iso(_spec(name="web-1"), "ssh-ed25519 AAAA...")
 
     remove_mock.assert_not_called()
+
+
+def test_build_seed_iso_omits_write_files_when_no_startup_script(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, check):
+        captured["user_data"] = Path(cmd[2]).read_text()
+
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
+    monkeypatch.setattr("mini_vps.resources.os.path.exists", lambda p: False)
+
+    build_seed_iso(_spec(name="web-1"), "ssh-ed25519 AAAA...")
+
+    parsed = yaml.safe_load(captured["user_data"])
+    assert "write_files" not in parsed
+    assert "runcmd" not in parsed
+
+
+def test_build_seed_iso_includes_write_files_and_runcmd_when_startup_script_set(
+    monkeypatch,
+):
+    captured = {}
+
+    def fake_run(cmd, check):
+        captured["user_data"] = Path(cmd[2]).read_text()
+
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
+    monkeypatch.setattr("mini_vps.resources.os.path.exists", lambda p: False)
+
+    spec = _spec(name="web-1", startup_script="opencode-sakura-ai-engine")
+    build_seed_iso(spec, "ssh-ed25519 AAAA...", secrets={"AI_ENGINE_TOKEN": "sk-abc"})
+
+    parsed = yaml.safe_load(captured["user_data"])
+    assert "write_files" in parsed
+    assert "runcmd" in parsed
+    assert "sk-abc" in captured["user_data"]
+
+
+def test_build_seed_iso_propagates_missing_secret_error_before_cloud_localds(
+    monkeypatch,
+):
+    run_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", run_mock)
+    monkeypatch.setattr("mini_vps.resources.os.path.exists", lambda p: False)
+
+    spec = _spec(name="web-1", startup_script="opencode-sakura-ai-engine")
+
+    with pytest.raises(StartupScriptError):
+        build_seed_iso(spec, "ssh-ed25519 AAAA...", secrets=None)
+
+    # secrets 不足を検知した時点で失敗するため、cloud-localds は一切呼ばれない
+    run_mock.assert_not_called()

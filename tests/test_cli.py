@@ -6,6 +6,7 @@ import pytest
 
 from mini_vps import cli
 from mini_vps.manager import ServerConflict, ServerNotFound
+from mini_vps.startup_scripts import StartupScriptError
 
 SPEC_YAML = """\
 name: web-1
@@ -24,6 +25,22 @@ def mock_manager():
 def _factory(mgr):
     """main() の manager_factory に注入する、mgr を素通しするコンテキストマネージャ。"""
     return lambda: contextlib.nullcontext(mgr)
+
+
+# --- _parse_startup_params ---
+
+
+def test_parse_startup_params_builds_dict():
+    assert cli._parse_startup_params(["A=1", "B=2"]) == {"A": "1", "B": "2"}
+
+
+def test_parse_startup_params_keeps_first_only_split():
+    assert cli._parse_startup_params(["A=1=2=3"]) == {"A": "1=2=3"}
+
+
+def test_parse_startup_params_rejects_missing_equals():
+    with pytest.raises(StartupScriptError):
+        cli._parse_startup_params(["NOVALUE"])
 
 
 # --- list ---
@@ -100,7 +117,7 @@ def test_reinstall_prints_json(mock_manager, capsys):
     exit_code = cli.main(["reinstall", "web-1"], manager_factory=_factory(mock_manager))
 
     assert exit_code == 0
-    mock_manager.reinstall.assert_called_once_with("web-1")
+    mock_manager.reinstall.assert_called_once_with("web-1", secrets=None)
     assert json.loads(capsys.readouterr().out) == mock_manager.reinstall.return_value
 
 
@@ -154,3 +171,67 @@ def test_create_returns_exit_code_1_when_spec_invalid(mock_manager, tmp_path):
 
     assert exit_code == 1
     mock_manager.create.assert_not_called()
+
+
+# --- --startup-param ---
+
+
+def test_create_forwards_startup_params_as_secrets(mock_manager, tmp_path):
+    mock_manager.create.return_value = ({"spec": {}, "status": {}}, True)
+    spec_file = tmp_path / "vm.yaml"
+    spec_file.write_text(SPEC_YAML)
+
+    exit_code = cli.main(
+        [
+            "create",
+            str(spec_file),
+            "--startup-param",
+            "AI_ENGINE_TOKEN=sk-abc",
+        ],
+        manager_factory=_factory(mock_manager),
+    )
+
+    assert exit_code == 0
+    called_secrets = mock_manager.create.call_args.kwargs["secrets"]
+    assert called_secrets == {"AI_ENGINE_TOKEN": "sk-abc"}
+
+
+def test_create_keeps_equals_sign_in_startup_param_value(mock_manager, tmp_path):
+    mock_manager.create.return_value = ({"spec": {}, "status": {}}, True)
+    spec_file = tmp_path / "vm.yaml"
+    spec_file.write_text(SPEC_YAML)
+
+    cli.main(
+        ["create", str(spec_file), "--startup-param", "AI_ENGINE_TOKEN=sk=a=b"],
+        manager_factory=_factory(mock_manager),
+    )
+
+    called_secrets = mock_manager.create.call_args.kwargs["secrets"]
+    assert called_secrets == {"AI_ENGINE_TOKEN": "sk=a=b"}
+
+
+def test_create_returns_exit_code_1_on_malformed_startup_param(mock_manager, tmp_path):
+    spec_file = tmp_path / "vm.yaml"
+    spec_file.write_text(SPEC_YAML)
+
+    exit_code = cli.main(
+        ["create", str(spec_file), "--startup-param", "no-equals-sign"],
+        manager_factory=_factory(mock_manager),
+    )
+
+    assert exit_code == 1
+    mock_manager.create.assert_not_called()
+
+
+def test_reinstall_forwards_startup_params_as_secrets(mock_manager):
+    mock_manager.reinstall.return_value = {"spec": {}, "status": {}}
+
+    exit_code = cli.main(
+        ["reinstall", "web-1", "--startup-param", "AI_ENGINE_TOKEN=sk-abc"],
+        manager_factory=_factory(mock_manager),
+    )
+
+    assert exit_code == 0
+    mock_manager.reinstall.assert_called_once_with(
+        "web-1", secrets={"AI_ENGINE_TOKEN": "sk-abc"}
+    )

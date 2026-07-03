@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 import mini_vps.api as api_module
 from mini_vps.manager import ServerConflict, ServerNotFound
+from mini_vps.startup_scripts import StartupScriptError
 
 
 @pytest.fixture
@@ -86,6 +87,46 @@ def test_put_server_returns_409_on_conflict(client):
     assert response.status_code == 409
 
 
+def test_put_server_separates_secrets_from_spec_passed_to_manager(client):
+    test_client, mock_manager = client
+    mock_manager.create.return_value = ({"spec": {}, "status": {}}, True)
+
+    response = test_client.put(
+        "/servers/web-1",
+        json={**PUT_BODY, "secrets": {"AI_ENGINE_TOKEN": "sk-abc"}},
+    )
+
+    assert response.status_code == 201
+    called_spec, called_kwargs = mock_manager.create.call_args
+    assert "secrets" not in called_spec[0]
+    assert called_kwargs["secrets"] == {"AI_ENGINE_TOKEN": "sk-abc"}
+
+
+def test_put_server_rejects_unknown_startup_script(client):
+    test_client, mock_manager = client
+
+    response = test_client.put(
+        "/servers/web-1", json={**PUT_BODY, "startup_script": "no-such-template"}
+    )
+
+    assert response.status_code == 422
+    mock_manager.create.assert_not_called()
+
+
+def test_put_server_returns_422_on_startup_script_error(client):
+    test_client, mock_manager = client
+    mock_manager.create.side_effect = StartupScriptError(
+        "secrets['AI_ENGINE_TOKEN'] が必須です"
+    )
+
+    response = test_client.put(
+        "/servers/web-1",
+        json={**PUT_BODY, "startup_script": "opencode-sakura-ai-engine"},
+    )
+
+    assert response.status_code == 422
+
+
 # --- delete_server ---
 
 
@@ -108,4 +149,19 @@ def test_reinstall_server_returns_200(client):
     response = test_client.post("/servers/web-1/reinstall")
 
     assert response.status_code == 200
-    mock_manager.reinstall.assert_called_once_with("web-1")
+    mock_manager.reinstall.assert_called_once_with("web-1", secrets=None)
+
+
+def test_reinstall_server_forwards_secrets_from_body(client):
+    test_client, mock_manager = client
+    mock_manager.reinstall.return_value = {"spec": {}, "status": {}}
+
+    response = test_client.post(
+        "/servers/web-1/reinstall",
+        json={"secrets": {"AI_ENGINE_TOKEN": "sk-abc"}},
+    )
+
+    assert response.status_code == 200
+    mock_manager.reinstall.assert_called_once_with(
+        "web-1", secrets={"AI_ENGINE_TOKEN": "sk-abc"}
+    )

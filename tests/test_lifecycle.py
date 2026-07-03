@@ -50,7 +50,7 @@ def test_provision_defines_nwfilter_when_filters_present(monkeypatch):
         "mini_vps.lifecycle.create_overlay_volume", lambda c, s: "/overlay.qcow2"
     )
     monkeypatch.setattr(
-        "mini_vps.lifecycle.build_seed_iso", lambda s, pubkey: "/seed.iso"
+        "mini_vps.lifecycle.build_seed_iso", lambda s, pubkey, secrets=None: "/seed.iso"
     )
     monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
     build_domain_xml_mock = MagicMock(return_value="<domain/>")
@@ -73,7 +73,7 @@ def test_provision_skips_nwfilter_when_absent(monkeypatch):
         "mini_vps.lifecycle.create_overlay_volume", lambda c, s: "/overlay.qcow2"
     )
     monkeypatch.setattr(
-        "mini_vps.lifecycle.build_seed_iso", lambda s, pubkey: "/seed.iso"
+        "mini_vps.lifecycle.build_seed_iso", lambda s, pubkey, secrets=None: "/seed.iso"
     )
     monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
     build_domain_xml_mock = MagicMock(return_value="<domain/>")
@@ -85,6 +85,51 @@ def test_provision_skips_nwfilter_when_absent(monkeypatch):
     build_domain_xml_mock.assert_called_once_with(
         spec, "/overlay.qcow2", "/seed.iso", filter_name=None
     )
+
+
+def test_provision_passes_secrets_to_build_seed_iso(monkeypatch):
+    conn = MagicMock()
+    spec = {"name": "web-1"}
+    secrets = {"AI_ENGINE_TOKEN": "sk-abc"}
+    monkeypatch.setattr("mini_vps.lifecycle.ensure_network_active", MagicMock())
+    monkeypatch.setattr(
+        "mini_vps.lifecycle.create_overlay_volume", lambda c, s: "/overlay.qcow2"
+    )
+    build_seed_mock = MagicMock(return_value="/seed.iso")
+    monkeypatch.setattr("mini_vps.lifecycle.build_seed_iso", build_seed_mock)
+    monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
+    monkeypatch.setattr(
+        "mini_vps.lifecycle.build_domain_xml", MagicMock(return_value="<domain/>")
+    )
+
+    provision(conn, spec, secrets=secrets)
+
+    build_seed_mock.assert_called_once_with(spec, "ssh-ed25519 AAAA", secrets=secrets)
+
+
+def test_provision_builds_seed_before_overlay(monkeypatch):
+    conn = MagicMock()
+    spec = {"name": "web-1"}
+    call_order = []
+    monkeypatch.setattr("mini_vps.lifecycle.ensure_network_active", MagicMock())
+    monkeypatch.setattr(
+        "mini_vps.lifecycle.create_overlay_volume",
+        lambda c, s: call_order.append("overlay") or "/overlay.qcow2",
+    )
+    monkeypatch.setattr(
+        "mini_vps.lifecycle.build_seed_iso",
+        lambda s, pubkey, secrets=None: call_order.append("seed") or "/seed.iso",
+    )
+    monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
+    monkeypatch.setattr(
+        "mini_vps.lifecycle.build_domain_xml", MagicMock(return_value="<domain/>")
+    )
+
+    provision(conn, spec)
+
+    # secrets 不足による StartupScriptError を、overlay volume 作成という
+    # コストのかかる処理の前に検知するための順序(フェイルファスト)
+    assert call_order == ["seed", "overlay"]
 
 
 # --- _lease_ipv4 ---

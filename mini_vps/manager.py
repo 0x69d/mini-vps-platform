@@ -224,7 +224,9 @@ class ServerManager:
         with self._locks_guard:
             return self._locks.setdefault(name, threading.Lock())
 
-    def create(self, spec: dict) -> tuple[dict, bool]:
+    def create(
+        self, spec: dict, secrets: dict[str, str] | None = None
+    ) -> tuple[dict, bool]:
         """VM を宣言的・冪等に作成し、(spec と状態, 新規作成か) を返す。
 
         既存と spec が一致すれば無変更で現状を返し、相違 or 管理対象外なら破壊せず
@@ -238,6 +240,9 @@ class ServerManager:
 
         Args:
             spec: VM スペックの dict。
+            secrets: spec["startup_script"] テンプレートに渡す秘密情報の dict。
+                provision() にのみ渡し、_write_spec() には一切渡さない
+                (libvirt の metadata に永続化させないため)。
 
         Returns:
             (result, created) のタプル。result は spec と status をキーに持つ dict。
@@ -257,7 +262,7 @@ class ServerManager:
 
             # 新規は起動前に metadata を付け、途中失敗は teardown で巻き戻す
             try:
-                dom = provision(self.conn, spec)
+                dom = provision(self.conn, spec, secrets=secrets)
                 _write_spec(dom, spec)
                 dom.create()
             except Exception:
@@ -332,14 +337,19 @@ class ServerManager:
             _lookup(self.conn, name)
             teardown(self.conn, {"name": name})
 
-    def reinstall(self, name: str) -> dict:
+    def reinstall(self, name: str, secrets: dict[str, str] | None = None) -> dict:
         """管理対象の VM の disk を base から作り直し、同じ spec で再起動する。
 
         domain 定義(MAC アドレス含む)は変更しないため IP は維持される。失敗時も
         対象 VM は削除せず、例外をそのまま呼び出し側に伝播させる。
 
+        spec["startup_script"] の秘密情報は metadata に永続化されないため、
+        テンプレートを再度効かせたい場合は呼び出しのたびに secrets を
+        渡し直す必要がある。
+
         Args:
             name: VM 名。
+            secrets: spec["startup_script"] テンプレートに渡す秘密情報の dict。
 
         Returns:
             spec と status をキーに持つ dict。
@@ -352,7 +362,7 @@ class ServerManager:
             spec = _read_spec(dom)
 
             # overlay 再作成(破壊的)より前に seed を作り直す
-            build_seed_iso(spec, read_pubkey())
+            build_seed_iso(spec, read_pubkey(), secrets=secrets)
 
             if dom.isActive():
                 dom.destroy()

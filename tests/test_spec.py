@@ -66,6 +66,24 @@ def test_server_spec_requires_name():
         ServerSpec(**payload)
 
 
+# --- startup_script ---
+
+
+def test_server_spec_startup_script_defaults_to_none():
+    spec = ServerSpec(**_base_spec_dict())
+    assert spec.startup_script is None
+
+
+def test_server_spec_accepts_known_startup_script():
+    spec = ServerSpec(**_base_spec_dict(startup_script="opencode-sakura-ai-engine"))
+    assert spec.startup_script == "opencode-sakura-ai-engine"
+
+
+def test_server_spec_rejects_unknown_startup_script():
+    with pytest.raises(ValidationError):
+        ServerSpec(**_base_spec_dict(startup_script="no-such-template"))
+
+
 # --- load_spec ---
 
 
