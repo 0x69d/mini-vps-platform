@@ -20,7 +20,7 @@ spec(YAML/JSON) → parse → XML → libvirt define/start という一方向の
 | Lint | `uv run ruff check` |
 | Format | `uv run ruff format`(CI は `--check`) |
 | テスト | `uv run pytest` |
-| デモ CLI | `uv run python -m mini_vps` |
+| CLI | `uv run mini-vps --help`(`uv run python -m mini_vps` も同一) |
 | Web API | `uv run uvicorn mini_vps.api:app` (`/docs` に OpenAPI) |
 | Prometheus エクスポーター | `uv run python -m mini_vps.exporter` (既定 `127.0.0.1:9177/metrics`) |
 
@@ -39,9 +39,11 @@ spec(YAML/JSON) → parse → XML → libvirt define/start という一方向の
 - **`resources.py`** — pool / overlay volume / seed ISO / domain XML / nwfilter XML の生成。
   純粋関数(`build_domain_xml`・`build_nwfilter_xml`・`_filter_name`)と、libvirt/subprocess を伴う関数が同居。
 - **`config.py`** — 定数(`LIBVIRT_URI` 含む)と XML/cloud-init テンプレート。
-- **入口** — CLI: `__main__.py`、Web API: `api.py`(manager の例外を HTTP ステータスへ正規化)、
+- **入口** — CLI: `cli.py`(manager の例外を終了コードへ正規化。`__main__.py` は `cli.run` への
+  shim)、Web API: `api.py`(manager の例外を HTTP ステータスへ正規化)、
   Prometheus エクスポーター: `exporter.py`(`ServerManager` を読み取り専用で再利用し、
   `conn.getAllDomainStats()` の一括統計を `prometheus_client` の Custom Collector として公開)。
+  CLI と Web API はどちらも `ServerManager` の薄いラッパーという対称な関係にある。
 
 ## コーディング規約
 
@@ -58,7 +60,9 @@ spec(YAML/JSON) → parse → XML → libvirt define/start という一方向の
 libvirt 接続・subprocess に依存する関数は `unittest.mock`(`MagicMock`/`monkeypatch`)で
 外部呼び出しを差し替えてユニットテスト化する(`manager.py`・`lifecycle.py`・`resources.py` の残り・
 `exporter.py` の `DomainCollector.collect`)。`api.py` は `fastapi.testclient.TestClient` +
-`dependency_overrides` で HTTP 層を検証する。実 libvirtd・`cloud-localds` バイナリを要する結合的な
+`dependency_overrides` で HTTP 層を検証する。`cli.py` は `main(argv, manager_factory=...)` の
+`manager_factory` に `ServerManager` の Mock を返すコンテキストマネージャを注入して検証する
+(`dependency_overrides` の CLI 版)。実 libvirtd・`cloud-localds` バイナリを要する結合的な
 動作確認は、別途手動または統合実行で行う。
 
 ## 外部依存・前提(統合実行時のみ)

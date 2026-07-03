@@ -122,11 +122,32 @@ uv add pyyaml "libvirt-python==12.0.0" fastapi "uvicorn[standard]"
 
 `libvirt-python` のバージョンは、実行環境の libvirt と同じかそれ以下に揃える（新しいバインディングを古い `.so` に当てると実行時にシンボル不足になる）。手元のバージョンは `virsh --version` で確認する。
 
-### 4. 実行(デモ)
+### 4. CLI(YAML)
+
+人間向けの入口。宣言的 YAML を渡して VM を操作する。`uv run mini-vps` または
+`uv run python -m mini_vps` のどちらでも同じ CLI が起動する。
 
 ```bash
-uv run python -m mini_vps
+uv run mini-vps create mini_vps/vm-spec.yaml
+uv run mini-vps list
+uv run mini-vps get web-1
+uv run mini-vps status web-1
+uv run mini-vps reinstall web-1
+uv run mini-vps delete web-1
 ```
+
+| サブコマンド | 説明 |
+|---|---|
+| `create <file>` | spec YAML から VM を宣言的・冪等に作成する |
+| `get <name>` | spec と状態を表示する(不在なら終了コード 2) |
+| `list` | 管理対象の VM 名を1行ずつ表示する |
+| `status <name>` | 状態(state・ip)を表示する(不在なら終了コード 2) |
+| `delete <name>` | VM を削除する(不在/管理外なら終了コード 2) |
+| `reinstall <name>` | disk を base から作り直して再起動する(不在なら終了コード 2) |
+
+`create` で spec が既存と相違、または管理外の同名 domain がある場合は終了コード 3
+(`ServerConflict`)で拒否する。CLI は Web API と同じ `ServerManager` を呼ぶ薄い
+フロントエンドで、どちらの入口を使っても操作結果は変わらない。
 
 ### 5. Web API(JSON)
 
