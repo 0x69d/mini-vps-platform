@@ -2,6 +2,7 @@
 
 import libvirt
 
+from .config import LIBVIRT_URI
 from .lifecycle import teardown, wait_for_ip
 from .manager import ServerManager
 from .spec import SAMPLE_SPEC, load_spec
@@ -9,7 +10,7 @@ from .spec import SAMPLE_SPEC, load_spec
 
 def main():
     """デモシーケンスを実行する。"""
-    conn = libvirt.open("qemu:///system")
+    conn = libvirt.open(LIBVIRT_URI)
     mgr = ServerManager(conn)
 
     spec = load_spec(SAMPLE_SPEC)
