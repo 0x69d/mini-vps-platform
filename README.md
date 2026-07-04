@@ -130,7 +130,7 @@ sudo usermod -aG libvirt "$USER"   # 反映には再ログイン
 ### 3. Python 依存（uv）
 
 ```bash
-uv add pyyaml "libvirt-python==12.0.0" fastapi "uvicorn[standard]"
+uv add pyyaml "libvirt-python==12.0.0" fastapi "uvicorn[standard]" typer
 ```
 
 `libvirt-python` のバージョンは、実行環境の libvirt と同じかそれ以下に揃える（新しいバインディングを古い `.so` に当てると実行時にシンボル不足になる）。手元のバージョンは `virsh --version` で確認する。
