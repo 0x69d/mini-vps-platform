@@ -1,0 +1,21 @@
+- name: libvirtd を起動・自動起動を有効にする
+  become: true
+  ansible.builtin.service:
+    name: libvirtd
+    state: started
+    enabled: true
+
+- name: 実行ユーザーを libvirt グループに追加する
+  become: true
+  ansible.builtin.user:
+    name: "{{ vps_user }}"
+    groups: libvirt
+    append: true
+  register: minivps_libvirt_group
+
+- name: グループ反映には再ログインが必要な旨を表示する
+  ansible.builtin.debug:
+    msg: >-
+      {{ vps_user }} を libvirt グループに追加しました。このシェルにまだ反映
+      されていない場合は再ログイン(または `newgrp libvirt`)してください。
+  when: minivps_libvirt_group is changed

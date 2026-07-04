@@ -46,3 +46,25 @@ jobs:
 
       - name: Validate docker-compose.yml syntax
         run: docker compose config -q
+
+  ansible-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python 3.14
+        run: uv python install 3.14
+
+      - name: Sync ops-only dependencies
+        # --no-install-project でmini_vps本体(libvirt-python含む)のビルドを避ける。
+        # ansible-core/ansible-lint はpure Pythonで完結し、libvirt-devは不要。
+        run: uv sync --only-group ops --no-install-project
+
+      - name: Ansible syntax check
+        run: uv run ansible-playbook -i ansible/inventory.ini ansible/playbook.yml --syntax-check
+
+      - name: ansible-lint
+        run: uv run ansible-lint ansible/playbook.yml

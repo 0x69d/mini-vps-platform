@@ -1,0 +1,15 @@
+---
+# 対応可能なゲストOSの一覧(docs/guest-os.md と対応)。
+# fetch: true のエントリのみ tasks/base_images.yml が自動ダウンロードする。
+# verified: true は実機で起動・IPリース・SSHログインまで確認済みであることを示す。
+guest_images:
+  - name: ubuntu-24.04.img
+    os: "Ubuntu 24.04 LTS (Noble Numbat) - server cloudimg"
+    url: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+    verified: true
+    fetch: true
+  - name: fedora-43.qcow2
+    os: "Fedora Cloud Base 43 (Generic variant)"
+    url: "https://dl.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2"
+    verified: true
+    fetch: true

@@ -10,13 +10,13 @@ import yaml
 from .config import (
     BASE_POOL,
     DOMAIN_XML_TEMPLATE,
-    LAB_DIR,
     META_DATA_TEMPLATE,
     NWFILTER_PORT_RULE_TEMPLATE,
     NWFILTER_XML_TEMPLATE,
     OVERLAY_VOL_XML_TEMPLATE,
     POOL_NAME,
     POOL_XML,
+    SEED_DIR,
 )
 from .startup_scripts import render_startup_script
 
@@ -111,7 +111,7 @@ def build_seed_iso(spec, pubkey, secrets: dict[str, str] | None = None) -> str:
     """Seed ISO を生成してパスを返す。
 
     user-data と meta-data を一時ファイルに書き出し、cloud-localds で
-    {name}-seed.iso を LAB_DIR に生成する。
+    {name}-seed.iso を SEED_DIR に生成する。
 
     Args:
         spec: VM スペックの dict。
@@ -126,7 +126,7 @@ def build_seed_iso(spec, pubkey, secrets: dict[str, str] | None = None) -> str:
         _build_user_data(spec, pubkey, secrets), sort_keys=False
     )
     meta_data = META_DATA_TEMPLATE.format(name=spec["name"], hostname=spec["hostname"])
-    seed_path = f"{LAB_DIR}/{spec['name']}-seed.iso"
+    seed_path = f"{SEED_DIR}/{spec['name']}-seed.iso"
 
     # libvirt driver は dynamic_ownership=1 が既定のため、一度でも起動した VM の
     # seed ISO は起動時に libvirt-qemu:kvm へ chown され、実行ユーザーからは

@@ -1,0 +1,44 @@
+- name: default ネットワークの状態を確認する
+  ansible.builtin.command: virsh net-info default
+  register: minivps_net_info
+  changed_when: false
+  failed_when: false
+
+- name: 標準の default network XML の存在を確認する
+  ansible.builtin.stat:
+    path: /usr/share/libvirt/networks/default.xml
+  register: minivps_default_net_xml
+  when: minivps_net_info.rc != 0
+
+- name: 標準XMLが無ければ明確に失敗する
+  ansible.builtin.fail:
+    msg: >-
+      /usr/share/libvirt/networks/default.xml が見つかりません。
+      libvirt-daemon-system(または相当パッケージ)が正しく導入されているか
+      確認してください。
+  when:
+    - minivps_net_info.rc != 0
+    - not minivps_default_net_xml.stat.exists
+
+- name: default ネットワークを定義する
+  become: true
+  ansible.builtin.command: virsh net-define /usr/share/libvirt/networks/default.xml
+  when: minivps_net_info.rc != 0
+  changed_when: true
+
+- name: default ネットワークの状態を再確認する
+  ansible.builtin.command: virsh net-info default
+  register: minivps_net_info2
+  changed_when: false
+
+- name: default ネットワークを起動する(非アクティブの場合)
+  become: true
+  ansible.builtin.command: virsh net-start default
+  when: minivps_net_info2.stdout is not search('Active:\s+yes')
+  changed_when: true
+
+- name: default ネットワークの autostart を有効にする(未設定の場合)
+  become: true
+  ansible.builtin.command: virsh net-autostart default
+  when: minivps_net_info2.stdout is not search('Autostart:\s+yes')
+  changed_when: true

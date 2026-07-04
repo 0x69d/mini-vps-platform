@@ -1,0 +1,26 @@
+- name: base image の配置状況を確認する
+  ansible.builtin.stat:
+    path: "{{ images_pool_path }}/{{ item.name }}"
+  loop: "{{ guest_images | selectattr('fetch') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: minivps_base_image_stats
+
+- name: base image をダウンロードする(未取得のもののみ)
+  become: true
+  ansible.builtin.get_url:
+    url: "{{ item.item.url }}"
+    dest: "{{ images_pool_path }}/{{ item.item.name }}"
+    owner: root
+    group: root
+    mode: "0644"
+    timeout: 1800
+  loop: "{{ minivps_base_image_stats.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: not item.stat.exists
+
+- name: images プールをリフレッシュする(新規配置分をvirshに認識させる)
+  become: true
+  ansible.builtin.command: virsh pool-refresh images
+  changed_when: false

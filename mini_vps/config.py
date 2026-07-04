@@ -2,9 +2,9 @@
 
 LIBVIRT_URI = "qemu:///system"
 POOL_NAME = "vps-pool"
-POOL_PATH = "/var/lib/libvirt/images/vps-pool"
+POOL_PATH = "/var/lib/libvirt/vps-pool"
 BASE_POOL = "images"
-LAB_DIR = "/var/lib/libvirt/images/lab"
+SEED_DIR = "/var/lib/libvirt/seeds"
 
 # 管理対象 domain の <metadata> に spec を埋め込むための名前空間。
 # URI は単なる一意識別子で、機能上は任意の文字列でよい(プレースホルダ)。

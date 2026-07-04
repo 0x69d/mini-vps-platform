@@ -1,0 +1,55 @@
+- name: images プールの定義有無を確認する
+  ansible.builtin.command: virsh pool-info images
+  register: minivps_images_pool_info
+  changed_when: false
+  failed_when: false
+
+- name: images プール定義XMLの一時ファイルを準備する
+  ansible.builtin.tempfile:
+    state: file
+    suffix: .xml
+  register: minivps_images_pool_xml_tmp
+  when: minivps_images_pool_info.rc != 0
+
+- name: images プール定義XMLをレンダリングする
+  ansible.builtin.template:
+    src: templates/images-pool.xml.j2
+    dest: "{{ minivps_images_pool_xml_tmp.path }}"
+    mode: "0644"
+  when: minivps_images_pool_info.rc != 0
+
+- name: images プールを定義する
+  become: true
+  ansible.builtin.command: "virsh pool-define {{ minivps_images_pool_xml_tmp.path }}"
+  when: minivps_images_pool_info.rc != 0
+  changed_when: true
+
+- name: images プール定義XMLの一時ファイルを削除する
+  ansible.builtin.file:
+    path: "{{ minivps_images_pool_xml_tmp.path }}"
+    state: absent
+  when: minivps_images_pool_info.rc != 0
+
+- name: images プールのターゲットディレクトリを確保する(dir型プールのbuild)
+  become: true
+  ansible.builtin.command: virsh pool-build images
+  when: minivps_images_pool_info.rc != 0
+  changed_when: true
+  failed_when: false
+
+- name: images プールの状態を再確認する
+  ansible.builtin.command: virsh pool-info images
+  register: minivps_images_pool_info2
+  changed_when: false
+
+- name: images プールを起動する(非アクティブの場合)
+  become: true
+  ansible.builtin.command: virsh pool-start images
+  when: minivps_images_pool_info2.stdout is not search('State:\s+running')
+  changed_when: true
+
+- name: images プールの autostart を有効にする(未設定の場合)
+  become: true
+  ansible.builtin.command: virsh pool-autostart images
+  when: minivps_images_pool_info2.stdout is not search('Autostart:\s+yes')
+  changed_when: true

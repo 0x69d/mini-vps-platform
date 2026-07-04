@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 import libvirt
 import pytest
 
-from mini_vps.config import LAB_DIR, POOL_NAME
+from mini_vps.config import POOL_NAME, SEED_DIR
 from mini_vps.lifecycle import (
     _lease_ipv4,
     ensure_network_active,
@@ -287,4 +287,4 @@ def test_teardown_removes_seed_iso_when_present(monkeypatch):
 
     teardown(conn, {"name": "web-1"})
 
-    remove_mock.assert_called_once_with(f"{LAB_DIR}/web-1-seed.iso")
+    remove_mock.assert_called_once_with(f"{SEED_DIR}/web-1-seed.iso")
