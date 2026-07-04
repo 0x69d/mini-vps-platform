@@ -26,8 +26,11 @@ from .manager import (
 from .spec import load_spec
 from .startup_scripts import StartupScriptError
 
-# add_completion=False: 運用ツールにシェル補完は不要なため CLI 表面を減らす。
-app = typer.Typer(add_completion=False)
+# add_completion=False: 運用ツールにシェル補完は不要なため。
+app = typer.Typer(
+    add_completion=False,
+    help="QEMU/KVM + libvirt 製 VM 制御プレーンの CLI",
+)
 
 # create/reinstall で共有する --startup-param オプションの型。
 _StartupParamOption = Annotated[
@@ -101,10 +104,10 @@ def _print_result(result) -> None:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _handle_errors(func):
-    """コマンド関数を包み、manager.py 由来の例外を終了コードへ正規化する。
+def _run_command(func):
+    """コマンド関数を包み、manager 接続の開閉と例外の終了コード正規化を行う。
 
-    api.py の @app.exception_handler(...) と対称に、業務例外を
+    api.py の @app.exception_handler(...) と対称に、例外を
     「HTTP ステータス」ではなく「終了コード」へ変換する。引数不足など
     純粋な Typer の使用法エラーはここでは扱わず、Typer の既定動作
     (終了コード2, Usage 表示)に委ねる。
@@ -117,9 +120,12 @@ def _handle_errors(func):
     """
 
     @functools.wraps(func)
-    def wrapper(*args, **kwargs):
+    def wrapper(ctx: typer.Context, *args, **kwargs):
+        factory = ctx.obj
         try:
-            result = func(*args, **kwargs)
+            with factory() as mgr:
+                ctx.obj = mgr
+                result = func(ctx, *args, **kwargs)
         except ServerNotFound as e:
             print(f"error: server not found: {e}", file=sys.stderr)
             raise typer.Exit(code=2) from None
@@ -134,8 +140,24 @@ def _handle_errors(func):
     return wrapper
 
 
-@app.command("create", help="VM スペックの YAML から VM を宣言的に作成する")
-@_handle_errors
+def _command(name: str, *, help: str):
+    """`_run_command` を必ず適用したうえで `app.command` に登録する。
+
+    Args:
+        name: サブコマンド名。
+        help: `--help` に表示する説明文。
+
+    Returns:
+        コマンド関数に適用するデコレータ。
+    """
+
+    def decorator(func):
+        return app.command(name, help=help)(_run_command(func))
+
+    return decorator
+
+
+@_command("create", help="VM スペックの YAML から VM を宣言的に作成する")
 def _cmd_create(
     ctx: typer.Context,
     spec_file: Annotated[str, typer.Argument(help="VM スペックの YAML ファイルパス")],
@@ -158,29 +180,25 @@ def _cmd_create(
     return result
 
 
-@app.command("get", help="VM の spec と状態を取得する")
-@_handle_errors
+@_command("get", help="VM の spec と状態を取得する")
 def _cmd_get(ctx: typer.Context, name: str) -> dict:
     """指定 VM の spec と状態を返す。"""
     return ctx.obj.get(name)
 
 
-@app.command("list", help="管理対象の VM 名一覧を表示する")
-@_handle_errors
+@_command("list", help="管理対象の VM 名一覧を表示する")
 def _cmd_list(ctx: typer.Context) -> list[str]:
     """管理対象の VM 名一覧を返す。"""
     return ctx.obj.list()
 
 
-@app.command("status", help="VM の状態(state, ip)を取得する")
-@_handle_errors
+@_command("status", help="VM の状態(state, ip)を取得する")
 def _cmd_status(ctx: typer.Context, name: str) -> dict:
     """指定 VM の状態(state, ip)を返す。"""
     return ctx.obj.status(name)
 
 
-@app.command("delete", help="管理対象の VM を削除する")
-@_handle_errors
+@_command("delete", help="管理対象の VM を削除する")
 def _cmd_delete(ctx: typer.Context, name: str) -> str:
     """管理対象の VM を削除する。
 
@@ -191,8 +209,7 @@ def _cmd_delete(ctx: typer.Context, name: str) -> str:
     return f"deleted: {name}"
 
 
-@app.command("reinstall", help="VM の disk を base から作り直して再起動する")
-@_handle_errors
+@_command("reinstall", help="VM の disk を base から作り直して再起動する")
 def _cmd_reinstall(
     ctx: typer.Context,
     name: str,
@@ -211,7 +228,7 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
     """CLI のエントリポイント本体。
 
     manager.py の例外を、api.py の exception_handler(HTTP ステータス)と対称に
-    終了コードへ正規化する(実処理は各コマンド関数を包む _handle_errors が行う)。
+    終了コードへ正規化する(実処理は各コマンド関数を包む _run_command が行う)。
     Typer は既定(standalone_mode=True)で動作し、内部で sys.exit() する。
     その SystemExit を捕捉して int の終了コードとして返す。
 
@@ -226,11 +243,10 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
         spec ファイル関連のエラー 1、Typer の使用法エラー 2)。
     """
     factory = manager_factory or _open_manager
-    with factory() as mgr:
-        try:
-            app(args=argv, obj=mgr)
-        except SystemExit as e:
-            return e.code
+    try:
+        app(args=argv, obj=factory)
+    except SystemExit as e:
+        return e.code
     return 0
 
 
