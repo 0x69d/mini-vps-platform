@@ -14,6 +14,7 @@
     images_pool_path: /var/lib/libvirt/images
   vars_files:
     - vars/guest_images.yml
+    - vars/network_segments.yml
   tasks:
     - name: パッケージを導入する
       ansible.builtin.import_tasks: tasks/packages.yml
@@ -23,6 +24,13 @@
 
     - name: default ネットワークを用意する
       ansible.builtin.import_tasks: tasks/network.yml
+
+    - name: セグメント NAT ネットワークを用意する
+      ansible.builtin.include_tasks: tasks/segment_network.yml
+      loop: "{{ network_segments }}"
+      loop_control:
+        loop_var: segment
+        label: "{{ segment.name }}"
 
     - name: images プールを用意する
       ansible.builtin.import_tasks: tasks/images_pool.yml
