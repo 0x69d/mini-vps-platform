@@ -46,7 +46,7 @@ spec.yaml  →  parse  →  内部データ構造  →  XML 生成  →  libvirt
 name: web-1
 memory: 1024                  # MB
 vcpus: 2
-base_image: ubuntu-24.04.img
+base_image: ubuntu-26.04.img
 disk: 10                      # GB
 ```
 
@@ -94,7 +94,7 @@ VM の所属セグメントは spec の `network` で指定する。
 name: web-1
 memory: 1024
 vcpus: 2
-base_image: ubuntu-24.04.img
+base_image: ubuntu-26.04.img
 disk: 10
 network: seg1
 ```

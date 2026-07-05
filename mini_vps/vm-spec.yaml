@@ -3,6 +3,6 @@ hostname: web-1
 user: ubuntu
 memory: 1024
 vcpus: 2
-base_image: ubuntu-24.04.img
+base_image: ubuntu-26.04.img
 disk: 10
 network: default
