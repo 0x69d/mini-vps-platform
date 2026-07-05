@@ -64,7 +64,10 @@ jobs:
         run: uv sync --only-group ops --no-install-project
 
       - name: Ansible syntax check
-        run: uv run ansible-playbook -i ansible/inventory.ini ansible/playbook.yml --syntax-check
+        # --no-sync: 付けないと uv run が既定の依存構成(mini_vps本体込み)へ暗黙に
+        # 再syncし、直前の --only-group ops --no-install-project が無意味になって
+        # libvirt-python のビルドに失敗する。
+        run: uv run --no-sync ansible-playbook -i ansible/inventory.ini ansible/playbook.yml --syntax-check
 
       - name: ansible-lint
-        run: uv run ansible-lint ansible/playbook.yml
+        run: uv run --no-sync ansible-lint ansible/playbook.yml
