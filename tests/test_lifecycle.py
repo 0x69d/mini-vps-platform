@@ -226,7 +226,7 @@ def test_teardown_destroys_and_undefines_active_domain(monkeypatch):
     teardown(conn, {"name": "web-1"})
 
     dom.destroy.assert_called_once()
-    dom.undefine.assert_called_once()
+    dom.undefineFlags.assert_called_once_with(libvirt.VIR_DOMAIN_UNDEFINE_NVRAM)
 
 
 def test_teardown_skips_domain_when_absent(monkeypatch):

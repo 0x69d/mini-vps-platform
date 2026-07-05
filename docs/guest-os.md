@@ -6,12 +6,12 @@
 
 ## 暗黙の契約(前提条件)
 
-- **アーキテクチャ**: x86_64 + KVM(`<type arch='x86_64'>hvm</type>`)。
+- **アーキテクチャ**: x86_64 + KVM(`<type arch='x86_64' machine='q35'>hvm</type>`)。
 - **ディスク/NIC**: virtio(`bus='virtio'`)前提。virtio ドライバを内蔵した cloud
   image であること。
-- **ブート**: legacy BIOS(SeaBIOS)のみ。`DOMAIN_XML_TEMPLATE` に `<loader>`/OVMF
-  が無いため、**UEFI 専用の cloud image は起動できない**。「genericcloud」variant
-  等、BIOS bootable な qcow2/raw イメージのみが対象。
+- **ブート**: UEFI(`<os firmware='efi'>` による libvirt の firmware 自動選択、
+  `<loader secure='no'/>` で secure-boot 非対応 firmware を選択)。`teardown()` は
+  per-VM の nvram ファイルも `VIR_DOMAIN_UNDEFINE_NVRAM` フラグで併せて削除する。
 - **cloud-init**: NoCloud データソース。`cloud-localds` が `cidata` ラベルの ISO を
   生成し、ゲスト側の cloud-init がそれを読む前提(image 自体に NoCloud 対応の
   cloud-init が同梱されている必要がある)。
@@ -20,7 +20,9 @@
   `spec["user"]` のみを積み `default: true` は含めないため、base image に組み込み
   のユーザーがあってもそれは作成されず、常に `spec.user` で SSH ログインする。
 - **実機検証済み**: Ubuntu 24.04 LTS(`ubuntu-24.04.img`)、Fedora Cloud Base 43
-  (`fedora-43.qcow2`)。
+  (`fedora-43.qcow2`)。ただし legacy BIOS 時代の検証であり、UEFI + q35 移行後は
+  **再検証が必要**(いずれも hybrid GPT の genericcloud 系イメージのため UEFI
+  起動自体は問題ない見込みだが未確認)。
 
 ## 対応 OS 一覧
 
@@ -37,7 +39,7 @@
   起動後 DHCP リースが得られず、シリアルコンソールにも出力が無いまま CPU 時間
   だけ増加し続けた(9分待機しても IP 未確定)。legacy BIOS boot・NoCloud
   cloud-init との相性で何らかの問題がある可能性があるが、原因未特定。
-  `guest_images.yml` には追加していない。
+  `guest_images.yml` には追加していない。UEFI + q35 移行後に再度試す価値はある。
 
 ## base image の登録手順
 
@@ -58,7 +60,6 @@
 
 ## スコープ外(既知の制約)
 
-- UEFI 専用イメージは非対応(前述)。
 - IPv6・非 x86_64 アーキテクチャは非対応。
 - base image の中身(cloud-init 対応・virtio ドライバ有無)をアプリ側は一切検証
   しない。非対応イメージを指定した場合、`create` はエラーにならず、ブート失敗や

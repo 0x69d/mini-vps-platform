@@ -44,16 +44,22 @@ DOMAIN_XML_TEMPLATE = """
   <memory unit='KiB'>{memory_kib}</memory>
   <vcpu>{vcpus}</vcpu>
   <cpu mode='host-model'/>
-  <os>
-    <type arch='x86_64'>hvm</type>
+  <os firmware='efi'>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <loader secure='no'/>
     <boot dev='hd'/>
   </os>
   <features>
     <acpi/>
   </features>
+  <clock offset='utc'/>
+  <pm>
+    <suspend-to-mem enabled='no'/>
+    <suspend-to-disk enabled='no'/>
+  </pm>
   <devices>
     <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2'/>
+      <driver name='qemu' type='qcow2' discard='unmap'/>
       <source file='{overlay_path}'/>
       <target dev='vda' bus='virtio'/>
     </disk>
@@ -68,6 +74,9 @@ DOMAIN_XML_TEMPLATE = """
       <model type='virtio'/>
       {filterref}
     </interface>
+    <rng model='virtio'>
+      <backend model='random'>/dev/urandom</backend>
+    </rng>
     <serial type='pty'><target port='0'/></serial>
     <console type='pty'><target type='serial' port='0'/></console>
   </devices>

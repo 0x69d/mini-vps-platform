@@ -103,7 +103,10 @@ def teardown(conn, spec) -> None:
         dom = conn.lookupByName(spec["name"])
         if dom.isActive():
             dom.destroy()
-        dom.undefine()
+        # UEFI ドメインは per-VM の nvram ファイルを持つため、フラグ無しの undefine()
+        # だと失敗する。このフラグは nvram の無い(legacy BIOS の)ドメインに対しては
+        # no-op なので、既存ドメインとの後方互換は保たれる。
+        dom.undefineFlags(libvirt.VIR_DOMAIN_UNDEFINE_NVRAM)
 
     # nwfilter は使用中(domain にアタッチ中)は undefine できないため、domain の
     # undefine 後、かつ domain ブロックとは独立に判定する(provision 内で
