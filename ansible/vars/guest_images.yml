@@ -5,17 +5,17 @@
 # verified: true は実機で起動・IPリース・SSHログインまで確認済みであることを示す。
 guest_images:
   - name: ubuntu-26.04.img
-    os: "Ubuntu 26.04 LTS (Resolute) - server cloudimg"
+    os: "Ubuntu 26.04 LTS (Resolute, server cloudimg)"
     url: "https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img"
     verified: true
     fetch: true
   - name: ubuntu-24.04.img
-    os: "Ubuntu 24.04 LTS (Noble Numbat) - server cloudimg"
+    os: "Ubuntu 24.04 LTS (Noble Numbat, server cloudimg)"
     url: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
     verified: true
     fetch: false
   - name: debian-13.qcow2
-    os: "Debian 13 (trixie) - genericcloud"
+    os: "Debian 13 (trixie, genericcloud)"
     url: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
     verified: true
     fetch: false
