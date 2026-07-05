@@ -1,15 +1,41 @@
 ---
 # 対応可能なゲストOSの一覧(docs/guest-os.md と対応)。
-# fetch: true のエントリのみ tasks/base_images.yml が自動ダウンロードする。
+# fetch: true のエントリのみ tasks/base_images.yml が自動ダウンロードする
+# (既定ダウンロードは最小限に留め、他は必要になったとき fetch: true に変える)。
 # verified: true は実機で起動・IPリース・SSHログインまで確認済みであることを示す。
 guest_images:
+  - name: ubuntu-26.04.img
+    os: "Ubuntu 26.04 LTS (Resolute, server cloudimg)"
+    url: "https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img"
+    verified: true
+    fetch: true
   - name: ubuntu-24.04.img
-    os: "Ubuntu 24.04 LTS (Noble Numbat) - server cloudimg"
+    os: "Ubuntu 24.04 LTS (Noble Numbat, server cloudimg)"
     url: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
     verified: true
-    fetch: true
-  - name: fedora-43.qcow2
-    os: "Fedora Cloud Base 43 (Generic variant)"
-    url: "https://dl.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2"
+    fetch: false
+  - name: debian-13.qcow2
+    os: "Debian 13 (trixie, genericcloud)"
+    url: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
     verified: true
-    fetch: true
+    fetch: false
+  - name: fedora-44.qcow2
+    os: "Fedora Cloud Base 44 (Generic variant)"
+    url: "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+    verified: true
+    fetch: false
+  - name: rocky-10.qcow2
+    os: "Rocky Linux 10 GenericCloud (Base variant)"
+    url: "https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base.latest.x86_64.qcow2"
+    verified: true
+    fetch: false
+  - name: almalinux-10.qcow2
+    os: "AlmaLinux 10 GenericCloud (latest)"
+    url: "https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-latest.x86_64.qcow2"
+    verified: true
+    fetch: false
+  - name: opensuse-leap-16.0.qcow2
+    os: "openSUSE Leap 16.0 (Minimal-VM Cloud variant)"
+    url: "https://download.opensuse.org/distribution/leap/16.0/appliances/Leap-16.0-Minimal-VM.x86_64-Cloud.qcow2"
+    verified: true
+    fetch: false

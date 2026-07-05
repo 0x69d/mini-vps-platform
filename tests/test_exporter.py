@@ -97,7 +97,7 @@ def test_collect_only_includes_managed_domains():
         (unmanaged_dom, dict(RAW_RUNNING)),
     ]
 
-    families = list(DomainCollector(mgr).collect())
+    families = list(DomainCollector(lambda: mgr).collect())
 
     up_samples = _samples_by_name(families, "minivps_vm_up")
     assert [s.labels["vm"] for s in up_samples] == ["web-1"]
@@ -112,7 +112,7 @@ def test_collect_emits_one_hot_state():
         (dom, {"state.state": libvirt.VIR_DOMAIN_PAUSED})
     ]
 
-    families = list(DomainCollector(mgr).collect())
+    families = list(DomainCollector(lambda: mgr).collect())
 
     state_samples = {
         s.labels["state"]: s.value
@@ -132,7 +132,7 @@ def test_collect_skips_resource_metrics_when_shutoff():
         (dom, {"state.state": libvirt.VIR_DOMAIN_SHUTOFF})
     ]
 
-    families = list(DomainCollector(mgr).collect())
+    families = list(DomainCollector(lambda: mgr).collect())
 
     assert _samples_by_name(families, "minivps_vm_up")[0].value == 0.0
     assert _samples_by_name(families, "minivps_vm_vcpus") == []
@@ -157,7 +157,7 @@ def test_collect_emits_metrics_per_device():
     )
     mgr.conn.getAllDomainStats.return_value = [(dom, raw)]
 
-    families = list(DomainCollector(mgr).collect())
+    families = list(DomainCollector(lambda: mgr).collect())
 
     rx_samples = {
         s.labels["device"]: s.value
@@ -170,3 +170,74 @@ def test_collect_emits_metrics_per_device():
         for s in _samples_by_name(families, "minivps_vm_disk_read_bytes_total")
     }
     assert disk_samples == {"vda": 300}
+
+
+# --- エラーハンドリング ---
+
+
+def test_collect_reports_scrape_success_when_healthy():
+    mgr = MagicMock()
+    mgr.is_managed.return_value = True
+    dom = MagicMock()
+    dom.name.return_value = "web-1"
+    mgr.conn.getAllDomainStats.return_value = [(dom, dict(RAW_RUNNING))]
+
+    families = list(DomainCollector(lambda: mgr).collect())
+
+    success = _samples_by_name(families, "minivps_exporter_scrape_success")
+    assert [s.value for s in success] == [1.0]
+
+
+def test_collect_survives_libvirt_failure_and_reconnects():
+    broken_mgr = MagicMock()
+    broken_mgr.conn.getAllDomainStats.side_effect = libvirt.libvirtError("down")
+    healthy_mgr = MagicMock()
+    healthy_mgr.is_managed.return_value = True
+    dom = MagicMock()
+    dom.name.return_value = "web-1"
+    healthy_mgr.conn.getAllDomainStats.return_value = [(dom, dict(RAW_RUNNING))]
+    factory = MagicMock(side_effect=[broken_mgr, healthy_mgr])
+    collector = DomainCollector(factory)
+
+    failed = list(collector.collect())
+
+    # 失敗時: 例外を伝播させず scrape_success=0 のみ、VM メトリクスは無い
+    success = _samples_by_name(failed, "minivps_exporter_scrape_success")
+    assert [s.value for s in success] == [0.0]
+    assert _samples_by_name(failed, "minivps_vm_up") == []
+    broken_mgr.conn.close.assert_called_once()
+
+    recovered = list(collector.collect())
+
+    # 次回スクレイプ: factory から再接続して復旧する
+    assert factory.call_count == 2
+    success = _samples_by_name(recovered, "minivps_exporter_scrape_success")
+    assert [s.value for s in success] == [1.0]
+    up_samples = _samples_by_name(recovered, "minivps_vm_up")
+    assert [s.labels["vm"] for s in up_samples] == ["web-1"]
+
+
+def test_collect_skips_domain_vanished_mid_scrape():
+    mgr = MagicMock()
+    vanished_dom = MagicMock()
+    alive_dom = MagicMock()
+    alive_dom.name.return_value = "web-2"
+
+    def is_managed(dom):
+        if dom is vanished_dom:
+            raise libvirt.libvirtError("domain not found")
+        return True
+
+    mgr.is_managed.side_effect = is_managed
+    mgr.conn.getAllDomainStats.return_value = [
+        (vanished_dom, dict(RAW_RUNNING)),
+        (alive_dom, dict(RAW_RUNNING)),
+    ]
+
+    families = list(DomainCollector(lambda: mgr).collect())
+
+    # 消えた 1 台だけスキップし、残りとスクレイプ自体は成功扱い
+    up_samples = _samples_by_name(families, "minivps_vm_up")
+    assert [s.labels["vm"] for s in up_samples] == ["web-2"]
+    success = _samples_by_name(families, "minivps_exporter_scrape_success")
+    assert [s.value for s in success] == [1.0]
