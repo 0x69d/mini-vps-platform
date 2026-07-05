@@ -21,6 +21,7 @@ from .manager import (
     ServerConflict,
     ServerManager,
     ServerNotFound,
+    ServerNotRunning,
     register_quiet_error_handler,
 )
 from .spec import load_spec
@@ -40,6 +41,12 @@ _StartupParamOption = Annotated[
         metavar="KEY=VALUE",
         help="startup_script に渡す秘密パラメータ(複数回指定可)",
     ),
+]
+
+# stop/restart で共有する --force オプションの型。
+_ForceOption = Annotated[
+    bool,
+    typer.Option("--force", help="ACPI を待たず即座に強制する"),
 ]
 
 
@@ -132,6 +139,9 @@ def _run_command(func):
         except ServerConflict as e:
             print(f"error: server conflict: {e}", file=sys.stderr)
             raise typer.Exit(code=3) from None
+        except ServerNotRunning as e:
+            print(f"error: server not running: {e}", file=sys.stderr)
+            raise typer.Exit(code=4) from None
         except (ValidationError, yaml.YAMLError, OSError, StartupScriptError) as e:
             print(f"error: {e}", file=sys.stderr)
             raise typer.Exit(code=1) from None
@@ -198,6 +208,32 @@ def _cmd_status(ctx: typer.Context, name: str) -> dict:
     return ctx.obj.status(name)
 
 
+@_command("start", help="VM を起動する")
+def _cmd_start(ctx: typer.Context, name: str) -> dict:
+    """指定 VM を起動する(起動中なら冪等に no-op)。"""
+    return ctx.obj.start(name)
+
+
+@_command("stop", help="VM を停止する")
+def _cmd_stop(ctx: typer.Context, name: str, force: _ForceOption = False) -> dict:
+    """指定 VM を停止する(停止中なら冪等に no-op)。
+
+    既定はゲスト OS への ACPI 経由の正常シャットダウンで、実際に shutoff になる
+    まで待たない。--force 指定時は即座に強制停止する。
+    """
+    return ctx.obj.stop(name, force=force)
+
+
+@_command("restart", help="VM を再起動する(disk は保持する)")
+def _cmd_restart(ctx: typer.Context, name: str, force: _ForceOption = False) -> dict:
+    """指定 VM を再起動する。reinstall と異なり disk・spec・IP は変更しない。
+
+    既定はゲスト OS への ACPI 経由の正常再起動。--force 指定時は電源断→起動に
+    よる強制再起動を行う。
+    """
+    return ctx.obj.restart(name, force=force)
+
+
 @_command("delete", help="管理対象の VM を削除する")
 def _cmd_delete(ctx: typer.Context, name: str) -> str:
     """管理対象の VM を削除する。
@@ -240,7 +276,7 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
 
     Returns:
         プロセス終了コード(成功 0、ServerNotFound 2、ServerConflict 3、
-        spec ファイル関連のエラー 1、Typer の使用法エラー 2)。
+        ServerNotRunning 4、spec ファイル関連のエラー 1、Typer の使用法エラー 2)。
     """
     factory = manager_factory or _open_manager
     try:

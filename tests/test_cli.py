@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from mini_vps import cli
-from mini_vps.manager import ServerConflict, ServerNotFound
+from mini_vps.manager import ServerConflict, ServerNotFound, ServerNotRunning
 from mini_vps.startup_scripts import StartupScriptError
 
 SPEC_YAML = """\
@@ -87,6 +87,84 @@ def test_status_prints_json(mock_manager, capsys):
 
     assert exit_code == 0
     assert json.loads(capsys.readouterr().out) == mock_manager.status.return_value
+
+
+# --- start ---
+
+
+def test_start_prints_json(mock_manager, capsys):
+    mock_manager.start.return_value = {"spec": {}, "status": {}}
+
+    exit_code = cli.main(["start", "web-1"], manager_factory=_factory(mock_manager))
+
+    assert exit_code == 0
+    mock_manager.start.assert_called_once_with("web-1")
+    assert json.loads(capsys.readouterr().out) == mock_manager.start.return_value
+
+
+def test_start_returns_exit_code_2_when_not_found(mock_manager):
+    mock_manager.start.side_effect = ServerNotFound("web-1")
+
+    exit_code = cli.main(["start", "web-1"], manager_factory=_factory(mock_manager))
+
+    assert exit_code == 2
+
+
+# --- stop ---
+
+
+def test_stop_prints_json(mock_manager, capsys):
+    mock_manager.stop.return_value = {"spec": {}, "status": {}}
+
+    exit_code = cli.main(["stop", "web-1"], manager_factory=_factory(mock_manager))
+
+    assert exit_code == 0
+    mock_manager.stop.assert_called_once_with("web-1", force=False)
+    assert json.loads(capsys.readouterr().out) == mock_manager.stop.return_value
+
+
+def test_stop_forwards_force_flag(mock_manager):
+    mock_manager.stop.return_value = {"spec": {}, "status": {}}
+
+    exit_code = cli.main(
+        ["stop", "web-1", "--force"], manager_factory=_factory(mock_manager)
+    )
+
+    assert exit_code == 0
+    mock_manager.stop.assert_called_once_with("web-1", force=True)
+
+
+# --- restart ---
+
+
+def test_restart_prints_json(mock_manager, capsys):
+    mock_manager.restart.return_value = {"spec": {}, "status": {}}
+
+    exit_code = cli.main(["restart", "web-1"], manager_factory=_factory(mock_manager))
+
+    assert exit_code == 0
+    mock_manager.restart.assert_called_once_with("web-1", force=False)
+    assert json.loads(capsys.readouterr().out) == mock_manager.restart.return_value
+
+
+def test_restart_forwards_force_flag(mock_manager):
+    mock_manager.restart.return_value = {"spec": {}, "status": {}}
+
+    exit_code = cli.main(
+        ["restart", "web-1", "--force"], manager_factory=_factory(mock_manager)
+    )
+
+    assert exit_code == 0
+    mock_manager.restart.assert_called_once_with("web-1", force=True)
+
+
+def test_restart_returns_exit_code_4_when_not_running(mock_manager, capsys):
+    mock_manager.restart.side_effect = ServerNotRunning("web-1")
+
+    exit_code = cli.main(["restart", "web-1"], manager_factory=_factory(mock_manager))
+
+    assert exit_code == 4
+    assert "web-1" in capsys.readouterr().err
 
 
 # --- delete ---

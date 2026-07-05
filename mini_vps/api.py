@@ -16,6 +16,7 @@ from .manager import (
     ServerConflict,
     ServerManager,
     ServerNotFound,
+    ServerNotRunning,
     register_quiet_error_handler,
 )
 from .spec import ServerSpec, ServerSpecInput
@@ -59,6 +60,12 @@ class ReinstallRequest(BaseModel):
     secrets: dict[str, str] = Field(default_factory=dict)
 
 
+class PowerActionRequest(BaseModel):
+    """POST /servers/{name}/stop, /restart の任意 body。"""
+
+    force: bool = False
+
+
 def get_manager(request: Request) -> ServerManager:
     """共有 ServerManager を返す依存。"""
     return request.app.state.manager
@@ -74,6 +81,14 @@ async def _not_found_handler(request: Request, exc: ServerNotFound) -> JSONRespo
 async def _conflict_handler(request: Request, exc: ServerConflict) -> JSONResponse:
     """ServerConflict を 409 に変換する。"""
     return JSONResponse(status_code=409, content={"detail": f"server conflict: {exc}"})
+
+
+@app.exception_handler(ServerNotRunning)
+async def _not_running_handler(request: Request, exc: ServerNotRunning) -> JSONResponse:
+    """ServerNotRunning を 409 に変換する。"""
+    return JSONResponse(
+        status_code=409, content={"detail": f"server not running: {exc}"}
+    )
 
 
 @app.exception_handler(StartupScriptError)
@@ -133,6 +148,40 @@ def put_server(
     result, created = mgr.create(spec, secrets=secrets or None)
     response.status_code = 201 if created else 200
     return result
+
+
+@app.post("/servers/{name}/start")
+def start_server(name: str, mgr: ServerManager = Depends(get_manager)) -> dict:
+    """管理対象の VM を起動する(起動中なら冪等に no-op、不在/管理外なら 404)。"""
+    return mgr.start(name)
+
+
+@app.post("/servers/{name}/stop")
+def stop_server(
+    name: str,
+    body: PowerActionRequest | None = None,
+    mgr: ServerManager = Depends(get_manager),
+) -> dict:
+    """管理対象の VM を停止する(停止中なら冪等に no-op、不在/管理外なら 404)。
+
+    既定はゲスト OS への ACPI 経由の正常シャットダウンで、実際に shutoff になる
+    まで待たない。body.force=true 指定時は即座に強制停止する。
+    """
+    return mgr.stop(name, force=body.force if body else False)
+
+
+@app.post("/servers/{name}/restart")
+def restart_server(
+    name: str,
+    body: PowerActionRequest | None = None,
+    mgr: ServerManager = Depends(get_manager),
+) -> dict:
+    """管理対象の VM を再起動する(disk・spec・IP は変更しない、不在/管理外なら 404)。
+
+    既定はゲスト OS への ACPI 経由の正常再起動。body.force=true 指定時は
+    電源断→起動による強制再起動を行う。
+    """
+    return mgr.restart(name, force=body.force if body else False)
 
 
 @app.delete("/servers/{name}", status_code=204)

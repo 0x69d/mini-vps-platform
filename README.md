@@ -134,6 +134,9 @@ uv run mini-vps create mini_vps/vm-spec.yaml
 uv run mini-vps list
 uv run mini-vps get web-1
 uv run mini-vps status web-1
+uv run mini-vps start web-1
+uv run mini-vps stop web-1
+uv run mini-vps restart web-1
 uv run mini-vps reinstall web-1
 uv run mini-vps delete web-1
 ```
@@ -144,6 +147,9 @@ uv run mini-vps delete web-1
 | `get <name>` | spec と状態を表示する(不在なら終了コード 2) |
 | `list` | 管理対象の VM 名を1行ずつ表示する |
 | `status <name>` | 状態(state・ip)を表示する(不在なら終了コード 2) |
+| `start <name>` | VM を起動する(起動中なら冪等に no-op、不在なら終了コード 2) |
+| `stop <name> [--force]` | VM を停止する(停止中なら冪等に no-op、不在なら終了コード 2) |
+| `restart <name> [--force]` | disk を保持したまま VM を再起動する(不在なら終了コード 2) |
 | `delete <name>` | VM を削除する(不在/管理外なら終了コード 2) |
 | `reinstall <name>` | disk を base から作り直して再起動する(不在なら終了コード 2) |
 
@@ -154,6 +160,11 @@ uv run mini-vps delete web-1
 `create` で spec が既存と相違、または管理外の同名 domain がある場合は終了コード 3
 (`ServerConflict`)で拒否する。CLI は Web API と同じ `ServerManager` を呼ぶ薄い
 フロントエンドで、どちらの入口を使っても操作結果は変わらない。
+
+`stop`/`restart` の既定はゲスト OS への ACPI 経由の正常なシャットダウン/再起動の
+要求のみで、実際に状態が変わるまで待たない。`--force` 指定時は即座に強制する。
+停止中の VM に `restart`(force 無し)を実行すると終了コード 4(`ServerNotRunning`)
+で拒否する。
 
 ### 4. Web API(JSON)
 
@@ -171,6 +182,9 @@ OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
 | `GET` | `/servers/{name}` | spec と状態(不在なら 404) |
 | `GET` | `/servers/{name}/status` | 状態 state・ip(不在なら 404) |
 | `PUT` | `/servers/{name}` | 宣言的・冪等な作成/収束(新規 201・冪等 200・spec 相違 409) |
+| `POST` | `/servers/{name}/start` | VM を起動する(起動中なら冪等に no-op、不在/管理外 404) |
+| `POST` | `/servers/{name}/stop` | VM を停止する(停止中なら冪等に no-op、不在/管理外 404) |
+| `POST` | `/servers/{name}/restart` | disk を保持したまま VM を再起動する(不在/管理外 404) |
 | `DELETE` | `/servers/{name}` | 削除(成功 204・不在/管理外 404) |
 | `POST` | `/servers/{name}/reinstall` | disk を base から作り直して再起動(不在/管理外 404) |
 
@@ -179,6 +193,11 @@ OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
 指定した場合、nwfilter ルールは domain 定義に組み込む形で IP 確定を待たずに適用される。
 
 `DELETE` は VM 本体に加え、その VM 専用の nwfilter ルールも同時に削除する(孤児ルールは残さない)。
+
+`stop`/`restart` の既定はゲスト OS への ACPI 経由の正常なシャットダウン/再起動の
+要求のみで、実際に状態が変わるまで待たない(`GET /servers/{name}/status` でポーリング
+して確認する)。JSON body に `{"force": true}` を渡すと即座に強制する。停止中の VM に
+`restart`(force 無し)を実行すると 409(`ServerNotRunning`)で拒否する。
 
 `reinstall` は overlay volume のみを作り直すため spec・metadata・IP アドレス
 (MAC アドレス)・nwfilter ルールは変わらない。別 base image への入れ替えは対象外。

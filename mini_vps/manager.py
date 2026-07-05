@@ -90,6 +90,17 @@ class ServerConflict(Exception):
     """
 
 
+class ServerNotRunning(Exception):
+    """restart(force=False) の対象 VM が停止中であることを表す。
+
+    ACPI 経由の正常再起動は稼働中のゲスト OS にしか要求できない。libvirt の
+    生の例外を伝播させる代わりにこの例外で fail-loud に拒否することで、
+    ServerNotFound/ServerConflict と同様に CLI の終了コード・Web API の
+    HTTP ステータスへ正規化できるようにする(起動も含めた強制再起動は
+    force=True で行う)。
+    """
+
+
 def _lookup(conn, name: str):
     """指定した name の管理対象 domain を返す。
 
@@ -346,6 +357,89 @@ class ServerManager:
         with self._lock_for(name):
             _lookup(self.conn, name)
             teardown(self.conn, {"name": name})
+
+    def start(self, name: str) -> dict:
+        """管理対象の VM を起動する。
+
+        既に起動中なら何もせず現状を返す(冪等)。create()/reinstall() と同じく、
+        dom.create() の前に spec が参照する network を確実に起動する(ホスト再起動後
+        などで network だけ非アクティブなまま domain が残るケースに備える)。
+
+        Args:
+            name: VM 名。
+
+        Returns:
+            spec と status をキーに持つ dict。
+
+        Raises:
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+        """
+        with self._lock_for(name):
+            dom = _lookup(self.conn, name)
+            if not dom.isActive():
+                ensure_network_active(self.conn, _read_spec(dom))
+                dom.create()
+            return self.get(name)
+
+    def stop(self, name: str, force: bool = False) -> dict:
+        """管理対象の VM を停止する。
+
+        既に停止中なら何もせず現状を返す(冪等)。force=False(既定)は
+        dom.shutdown() でゲスト OS へ ACPI 経由の正常シャットダウンを要求するのみで、
+        実際に shutoff になるまで待たない(呼び出し側が status をポーリングして
+        確認する想定)。force=True は dom.destroy() で即座に電源を落とす
+        (応答しないゲストを落とす手段)。
+
+        Args:
+            name: VM 名。
+            force: True なら即座に強制停止する。
+
+        Returns:
+            spec と status をキーに持つ dict。
+
+        Raises:
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+        """
+        with self._lock_for(name):
+            dom = _lookup(self.conn, name)
+            if dom.isActive():
+                dom.destroy() if force else dom.shutdown()
+            return self.get(name)
+
+    def restart(self, name: str, force: bool = False) -> dict:
+        """管理対象の VM を再起動する。
+
+        reinstall と異なり disk・spec・IP は変更しない。force=False(既定)は
+        dom.reboot() でゲスト OS へ ACPI 経由の正常再起動を要求するのみで、
+        停止中の VM には ServerNotRunning を送出し fail-loud に拒否する(電源が
+        入っていない機器を ACPI 経由で再起動できないのと同じ)。force=True は
+        起動中なら destroy() してから create() する強制再起動(停止中の VM は
+        create() のみで起動する)。start()と同じく create() の前に network を
+        確実に起動する。
+
+        Args:
+            name: VM 名。
+            force: True なら電源断→起動による強制再起動を行う。
+
+        Returns:
+            spec と status をキーに持つ dict。
+
+        Raises:
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+            ServerNotRunning: force=False で対象 VM が停止中の場合。
+        """
+        with self._lock_for(name):
+            dom = _lookup(self.conn, name)
+            if force:
+                if dom.isActive():
+                    dom.destroy()
+                ensure_network_active(self.conn, _read_spec(dom))
+                dom.create()
+            else:
+                if not dom.isActive():
+                    raise ServerNotRunning(name)
+                dom.reboot()
+            return self.get(name)
 
     def reinstall(self, name: str, secrets: dict[str, str] | None = None) -> dict:
         """管理対象の VM の disk を base から作り直し、同じ spec で再起動する。
