@@ -42,10 +42,6 @@ def _write_spec(dom, spec: dict) -> None:
 
     ElementTree でテキストノードを組むことで、spec 値の & < > が自動エスケープされる。
     flags は AFFECT_CONFIG のみ。起動前に書くため、起動時の live が CONFIG を引き継ぐ。
-
-    Args:
-        dom: 書き込み対象の libvirt.virDomain。
-        spec: 書き込む VM スペックの dict。
     """
     el = ET.Element("spec")
     el.text = yaml.safe_dump(spec)
@@ -59,17 +55,7 @@ def _write_spec(dom, spec: dict) -> None:
 
 
 def _read_spec(dom) -> dict:
-    """VM スペックを dom の <metadata> から読み戻す。
-
-    Args:
-        dom: 読み取り対象の libvirt.virDomain。
-
-    Returns:
-        復元した VM スペックの dict。
-
-    Raises:
-        libvirt.libvirtError: metadata が存在しない場合。
-    """
+    """VM スペックを dom の <metadata> から読み戻す(未保有なら libvirtError)。"""
     raw = dom.metadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, METADATA_NS, 0)
     return yaml.safe_load(ET.fromstring(raw).text)
 
@@ -86,7 +72,7 @@ class ServerConflict(Exception):
     """create() の対象 name が既存実体と相違する(または管理対象外)ことを表す。
 
     収束ロジックを持たないため相違は fail-loud に拒否する。ServerNotFound と対称で、
-    将来の Web API では PUT /servers/{name} の 409 Conflict に対応づける想定。
+    Web API では PUT /servers/{name} の 409 Conflict に対応づける。
     """
 
 
@@ -105,19 +91,8 @@ def _lookup(conn, name: str):
     """指定した name の管理対象 domain を返す。
 
     存在しない、または minivps の管理対象外(metadata 未保有)の場合は
-    ServerNotFound に正規化する。これにより get / status / 将来のルーターが
-    libvirt のエラーコードを直接ハンドルせずに済む。
-
-    Args:
-        conn: libvirt 接続オブジェクト。
-        name: VM 名。
-
-    Returns:
-        管理対象の libvirt.virDomain。
-
-    Raises:
-        ServerNotFound: domain が存在しない、または管理対象外の場合。
-        libvirt.libvirtError: 上記以外の libvirt エラー。
+    ServerNotFound に正規化する。これにより呼び出し側は libvirt の
+    エラーコードを直接ハンドルせずに済む。
     """
     try:
         dom = conn.lookupByName(name)
@@ -140,16 +115,6 @@ def _find_domain(conn, name: str):
 
     metadata で絞らず存在のみを見るため、管理対象外の同名 domain も検知でき、
     create() が既存リソースを巻き込んで破壊する事故を防げる。
-
-    Args:
-        conn: libvirt 接続オブジェクト。
-        name: VM 名。
-
-    Returns:
-        domain が存在すれば libvirt.virDomain、無ければ None。
-
-    Raises:
-        libvirt.libvirtError: VIR_ERR_NO_DOMAIN 以外の libvirt エラー。
     """
     try:
         return conn.lookupByName(name)
@@ -160,17 +125,7 @@ def _find_domain(conn, name: str):
 
 
 def _is_managed(dom) -> bool:
-    """指定した domain が minivps の管理対象(spec metadata を保有)か判定する。
-
-    Args:
-        dom: 判定対象の libvirt.virDomain。
-
-    Returns:
-        管理対象なら True。
-
-    Raises:
-        libvirt.libvirtError: VIR_ERR_NO_DOMAIN_METADATA 以外の libvirt エラー。
-    """
+    """指定した domain が minivps の管理対象(spec metadata を保有)か判定する。"""
     try:
         dom.metadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, METADATA_NS, 0)
     except libvirt.libvirtError as e:
@@ -184,16 +139,6 @@ def _spec_matches(dom, spec: dict) -> bool:
     """保存済み spec と入力 spec が一致するか判定する。
 
     管理対象外(metadata 無し)は比較対象が無いため不一致扱い(=拒否)とする。
-
-    Args:
-        dom: 比較対象の libvirt.virDomain。
-        spec: 入力 VM スペックの dict。
-
-    Returns:
-        spec が一致すれば True。
-
-    Raises:
-        libvirt.libvirtError: VIR_ERR_NO_DOMAIN_METADATA 以外の libvirt エラー。
     """
     try:
         return _read_spec(dom) == spec
@@ -214,8 +159,9 @@ def _status_of(dom) -> dict:
 class ServerManager:
     """VM の作成・取得・一覧・削除を行う管理層。
 
-    create / delete は name 単位ロックで直列化し、同名への並行収束(check-then-act)の
-    TOCTOU を防ぐ。別 name 同士は並行のまま。get / list / status はロックを取らない
+    書き込み系操作(create/delete/start/stop/restart/reinstall)は name 単位ロックで
+    直列化し、同名への並行収束(check-then-act)の TOCTOU を防ぐ。
+    別 name 同士は並行のまま。get / list / status はロックを取らない
     (libvirt 接続が個々の呼び出し単位でスレッドセーフなため)。create() はロック内で
     self.get() を呼ぶので、読み取り側にロックを足すと非再帰 Lock で自己デッドロック
     する点に注意。
@@ -226,7 +172,7 @@ class ServerManager:
 
     def __init__(self, conn):
         self.conn = conn
-        # name -> Lock。新規 name の Lock 生成自体を _locks_guard で直列化する
+        # name -> Lock(生成の直列化は _lock_for を参照)
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
@@ -235,12 +181,6 @@ class ServerManager:
 
         dict.setdefault は CPython では実質アトミックだが、意図を明示するため
         _locks_guard で囲んで新規 name の Lock 生成を確実に直列化する。
-
-        Args:
-            name: VM 名。
-
-        Returns:
-            その name 専用の threading.Lock。
         """
         with self._locks_guard:
             return self._locks.setdefault(name, threading.Lock())
@@ -259,11 +199,8 @@ class ServerManager:
         (resources.create_overlay_volume)も provision 経由でこのロック内に入るため
         直列化される。
 
-        Args:
-            spec: VM スペックの dict。
-            secrets: spec["startup_script"] テンプレートに渡す秘密情報の dict。
-                provision() にのみ渡し、_write_spec() には一切渡さない
-                (libvirt の metadata に永続化させないため)。
+        secrets(startup_script テンプレートに渡す秘密情報)は provision() にのみ
+        渡し、_write_spec()(=libvirt metadata)には渡さない。
 
         Returns:
             (result, created) のタプル。result は spec と status をキーに持つ dict。
@@ -276,12 +213,10 @@ class ServerManager:
         with self._lock_for(name):
             existing = _find_domain(self.conn, name)
             if existing is not None:
-                # 一致なら冪等 no-op、相違 or 管理外なら破壊せず拒否
                 if _spec_matches(existing, spec):
                     return self.get(name), False
                 raise ServerConflict(name)
 
-            # 新規は起動前に metadata を付け、途中失敗は teardown で巻き戻す
             try:
                 dom = provision(self.conn, spec, secrets=secrets)
                 _write_spec(dom, spec)
@@ -293,9 +228,6 @@ class ServerManager:
 
     def get(self, name: str) -> dict:
         """指定した VM の spec と状態を返す。
-
-        Args:
-            name: VM 名。
 
         Returns:
             spec と status をキーに持つ dict。
@@ -319,20 +251,11 @@ class ServerManager:
 
         `getAllDomainStats()` のようにすでに domain オブジェクトを持っている
         呼び出し元が、`list()` と同じ判定基準で1件ずつ絞り込むために使う。
-
-        Args:
-            dom: 判定対象の libvirt.virDomain。
-
-        Returns:
-            管理対象なら True。
         """
         return _is_managed(dom)
 
     def status(self, name: str) -> dict:
         """指定した VM の現在の状態を返す。
-
-        Args:
-            name: VM 名。
 
         Returns:
             state と ip をキーに持つ dict。
@@ -346,9 +269,6 @@ class ServerManager:
         """管理対象の VM を削除する。
 
         未管理(または不在)の name は削除せず ServerNotFound で拒否する。
-
-        Args:
-            name: VM 名。
 
         Raises:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
@@ -364,9 +284,6 @@ class ServerManager:
         既に起動中なら何もせず現状を返す(冪等)。create()/reinstall() と同じく、
         dom.create() の前に spec が参照する network を確実に起動する(ホスト再起動後
         などで network だけ非アクティブなまま domain が残るケースに備える)。
-
-        Args:
-            name: VM 名。
 
         Returns:
             spec と status をキーに持つ dict。
@@ -390,10 +307,6 @@ class ServerManager:
         確認する想定)。force=True は dom.destroy() で即座に電源を落とす
         (応答しないゲストを落とす手段)。
 
-        Args:
-            name: VM 名。
-            force: True なら即座に強制停止する。
-
         Returns:
             spec と status をキーに持つ dict。
 
@@ -416,10 +329,6 @@ class ServerManager:
         起動中なら destroy() してから create() する強制再起動(停止中の VM は
         create() のみで起動する)。start()と同じく create() の前に network を
         確実に起動する。
-
-        Args:
-            name: VM 名。
-            force: True なら電源断→起動による強制再起動を行う。
 
         Returns:
             spec と status をキーに持つ dict。
@@ -450,10 +359,6 @@ class ServerManager:
         spec["startup_script"] の秘密情報は metadata に永続化されないため、
         テンプレートを再度効かせたい場合は呼び出しのたびに secrets を
         渡し直す必要がある。
-
-        Args:
-            name: VM 名。
-            secrets: spec["startup_script"] テンプレートに渡す秘密情報の dict。
 
         Returns:
             spec と status をキーに持つ dict。

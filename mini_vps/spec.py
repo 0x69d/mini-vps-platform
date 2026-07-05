@@ -92,12 +92,6 @@ def read_pubkey() -> str:
     """SSH 公開鍵を ~/.ssh/minivps_ed25519.pub から読み込んで返す。
 
     ユーザーの個人鍵(id_ed25519 等)とは別に、本ツール専用の鍵を使う。
-
-    Returns:
-        公開鍵の文字列(末尾の改行を除去済み)。
-
-    Raises:
-        FileNotFoundError: 公開鍵ファイルが存在しない場合。
     """
     pubkey_path = pathlib.Path.home() / ".ssh" / "minivps_ed25519.pub"
     with pubkey_path.open("r") as f:
@@ -109,14 +103,5 @@ def load_spec(text) -> dict:
     """YAML テキストを解析し、検証済み VM スペックの dict を返す。
 
     必須キー検証とデフォルト補完は ServerSpec(Pydantic)に委譲する。
-
-    Args:
-        text: vm-spec.yaml 形式の YAML 文字列。
-
-    Returns:
-        ServerSpec で正規化した dict。
-
-    Raises:
-        pydantic.ValidationError: 必須キー欠落や型不一致の場合。
     """
     return ServerSpec(**yaml.safe_load(text)).model_dump()
