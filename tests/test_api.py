@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import mini_vps.api as api_module
-from mini_vps.manager import ServerConflict, ServerNotFound
+from mini_vps.manager import ServerConflict, ServerNotFound, ServerNotRunning
 from mini_vps.startup_scripts import StartupScriptError
 
 
@@ -193,6 +193,15 @@ def test_restart_server_forwards_force_from_body(client):
 
     assert response.status_code == 200
     mock_manager.restart.assert_called_once_with("web-1", force=True)
+
+
+def test_restart_server_returns_409_when_not_running(client):
+    test_client, mock_manager = client
+    mock_manager.restart.side_effect = ServerNotRunning("web-1")
+
+    response = test_client.post("/servers/web-1/restart")
+
+    assert response.status_code == 409
 
 
 # --- delete_server ---

@@ -16,6 +16,7 @@ from .manager import (
     ServerConflict,
     ServerManager,
     ServerNotFound,
+    ServerNotRunning,
     register_quiet_error_handler,
 )
 from .spec import ServerSpec, ServerSpecInput
@@ -80,6 +81,14 @@ async def _not_found_handler(request: Request, exc: ServerNotFound) -> JSONRespo
 async def _conflict_handler(request: Request, exc: ServerConflict) -> JSONResponse:
     """ServerConflict を 409 に変換する。"""
     return JSONResponse(status_code=409, content={"detail": f"server conflict: {exc}"})
+
+
+@app.exception_handler(ServerNotRunning)
+async def _not_running_handler(request: Request, exc: ServerNotRunning) -> JSONResponse:
+    """ServerNotRunning を 409 に変換する。"""
+    return JSONResponse(
+        status_code=409, content={"detail": f"server not running: {exc}"}
+    )
 
 
 @app.exception_handler(StartupScriptError)

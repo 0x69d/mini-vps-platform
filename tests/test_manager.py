@@ -8,6 +8,7 @@ from mini_vps.manager import (
     ServerConflict,
     ServerManager,
     ServerNotFound,
+    ServerNotRunning,
     _find_domain,
     _is_managed,
     _lookup,
@@ -446,6 +447,7 @@ def test_restart_reboots_by_default(monkeypatch):
     conn = MagicMock()
     mgr = ServerManager(conn)
     dom = MagicMock()
+    dom.isActive.return_value = True
     monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
     mgr.get = MagicMock(return_value={"spec": {}, "status": {}})
 
@@ -454,6 +456,19 @@ def test_restart_reboots_by_default(monkeypatch):
     dom.reboot.assert_called_once()
     dom.destroy.assert_not_called()
     dom.create.assert_not_called()
+
+
+def test_restart_raises_not_running_when_inactive_and_not_forced(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+
+    with pytest.raises(ServerNotRunning):
+        mgr.restart("web-1")
+
+    dom.reboot.assert_not_called()
 
 
 def test_restart_destroys_then_creates_active_domain_when_forced(monkeypatch):

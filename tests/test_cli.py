@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from mini_vps import cli
-from mini_vps.manager import ServerConflict, ServerNotFound
+from mini_vps.manager import ServerConflict, ServerNotFound, ServerNotRunning
 from mini_vps.startup_scripts import StartupScriptError
 
 SPEC_YAML = """\
@@ -156,6 +156,15 @@ def test_restart_forwards_force_flag(mock_manager):
 
     assert exit_code == 0
     mock_manager.restart.assert_called_once_with("web-1", force=True)
+
+
+def test_restart_returns_exit_code_4_when_not_running(mock_manager, capsys):
+    mock_manager.restart.side_effect = ServerNotRunning("web-1")
+
+    exit_code = cli.main(["restart", "web-1"], manager_factory=_factory(mock_manager))
+
+    assert exit_code == 4
+    assert "web-1" in capsys.readouterr().err
 
 
 # --- delete ---

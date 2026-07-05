@@ -90,6 +90,17 @@ class ServerConflict(Exception):
     """
 
 
+class ServerNotRunning(Exception):
+    """restart(force=False) の対象 VM が停止中であることを表す。
+
+    ACPI 経由の正常再起動は稼働中のゲスト OS にしか要求できない。libvirt の
+    生の例外を伝播させる代わりにこの例外で fail-loud に拒否することで、
+    ServerNotFound/ServerConflict と同様に CLI の終了コード・Web API の
+    HTTP ステータスへ正規化できるようにする(起動も含めた強制再起動は
+    force=True で行う)。
+    """
+
+
 def _lookup(conn, name: str):
     """指定した name の管理対象 domain を返す。
 
@@ -399,11 +410,12 @@ class ServerManager:
         """管理対象の VM を再起動する。
 
         reinstall と異なり disk・spec・IP は変更しない。force=False(既定)は
-        dom.reboot() でゲスト OS へ ACPI 経由の正常再起動を要求するのみ(停止中の
-        VM に対しては libvirt がエラーを送出する。電源が入っていない機器を ACPI
-        経由で再起動できないのと同じ)。force=True は起動中なら destroy() してから
-        create() する強制再起動(停止中の VM は create() のみで起動する)。start()と
-        同じく create() の前に network を確実に起動する。
+        dom.reboot() でゲスト OS へ ACPI 経由の正常再起動を要求するのみで、
+        停止中の VM には ServerNotRunning を送出し fail-loud に拒否する(電源が
+        入っていない機器を ACPI 経由で再起動できないのと同じ)。force=True は
+        起動中なら destroy() してから create() する強制再起動(停止中の VM は
+        create() のみで起動する)。start()と同じく create() の前に network を
+        確実に起動する。
 
         Args:
             name: VM 名。
@@ -414,6 +426,7 @@ class ServerManager:
 
         Raises:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+            ServerNotRunning: force=False で対象 VM が停止中の場合。
         """
         with self._lock_for(name):
             dom = _lookup(self.conn, name)
@@ -423,6 +436,8 @@ class ServerManager:
                 ensure_network_active(self.conn, _read_spec(dom))
                 dom.create()
             else:
+                if not dom.isActive():
+                    raise ServerNotRunning(name)
                 dom.reboot()
             return self.get(name)
 

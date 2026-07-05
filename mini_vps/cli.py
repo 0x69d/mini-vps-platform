@@ -21,6 +21,7 @@ from .manager import (
     ServerConflict,
     ServerManager,
     ServerNotFound,
+    ServerNotRunning,
     register_quiet_error_handler,
 )
 from .spec import load_spec
@@ -138,6 +139,9 @@ def _run_command(func):
         except ServerConflict as e:
             print(f"error: server conflict: {e}", file=sys.stderr)
             raise typer.Exit(code=3) from None
+        except ServerNotRunning as e:
+            print(f"error: server not running: {e}", file=sys.stderr)
+            raise typer.Exit(code=4) from None
         except (ValidationError, yaml.YAMLError, OSError, StartupScriptError) as e:
             print(f"error: {e}", file=sys.stderr)
             raise typer.Exit(code=1) from None
@@ -272,7 +276,7 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
 
     Returns:
         プロセス終了コード(成功 0、ServerNotFound 2、ServerConflict 3、
-        spec ファイル関連のエラー 1、Typer の使用法エラー 2)。
+        ServerNotRunning 4、spec ファイル関連のエラー 1、Typer の使用法エラー 2)。
     """
     factory = manager_factory or _open_manager
     try:

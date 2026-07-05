@@ -162,8 +162,9 @@ uv run mini-vps delete web-1
 フロントエンドで、どちらの入口を使っても操作結果は変わらない。
 
 `stop`/`restart` の既定はゲスト OS への ACPI 経由の正常なシャットダウン/再起動の
-要求のみで、実際に状態が変わるまで待たない。`--force` 指定時は即座に強制する
-(停止中の VM に `restart`(force 無し)を実行すると libvirt がエラーを返す)。
+要求のみで、実際に状態が変わるまで待たない。`--force` 指定時は即座に強制する。
+停止中の VM に `restart`(force 無し)を実行すると終了コード 4(`ServerNotRunning`)
+で拒否する。
 
 ### 4. Web API(JSON)
 
@@ -195,8 +196,8 @@ OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
 
 `stop`/`restart` の既定はゲスト OS への ACPI 経由の正常なシャットダウン/再起動の
 要求のみで、実際に状態が変わるまで待たない(`GET /servers/{name}/status` でポーリング
-して確認する)。JSON body に `{"force": true}` を渡すと即座に強制する(停止中の VM に
-`restart`(force 無し)を実行すると libvirt がエラーを返す)。
+して確認する)。JSON body に `{"force": true}` を渡すと即座に強制する。停止中の VM に
+`restart`(force 無し)を実行すると 409(`ServerNotRunning`)で拒否する。
 
 `reinstall` は overlay volume のみを作り直すため spec・metadata・IP アドレス
 (MAC アドレス)・nwfilter ルールは変わらない。別 base image への入れ替えは対象外。
