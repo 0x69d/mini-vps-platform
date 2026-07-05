@@ -66,6 +66,69 @@ def test_server_spec_requires_name():
         ServerSpec(**payload)
 
 
+# --- name/network/hostname の文字種制約 ---
+
+
+@pytest.mark.parametrize("value", ["web-1", "web_1", "a", "A9", "x" * 63])
+def test_server_spec_accepts_valid_name_pattern(value):
+    spec = ServerSpec(**_base_spec_dict(name=value))
+    assert spec.name == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "a/b", "a'b", "<x>", "a b", "-leading-hyphen", "x" * 64],
+)
+def test_server_spec_rejects_invalid_name_pattern(value):
+    with pytest.raises(ValidationError):
+        ServerSpec(**_base_spec_dict(name=value))
+
+
+@pytest.mark.parametrize("value", ["default", "vps-net", "net_1"])
+def test_server_spec_accepts_valid_network_pattern(value):
+    spec = ServerSpec(**_base_spec_dict(network=value))
+    assert spec.network == value
+
+
+@pytest.mark.parametrize("value", ["a/b", "a'b", "<x>", "default;evil"])
+def test_server_spec_rejects_invalid_network_pattern(value):
+    with pytest.raises(ValidationError):
+        ServerSpec(**_base_spec_dict(network=value))
+
+
+@pytest.mark.parametrize("value", ["a/b", "a'b", "<x>", "a b"])
+def test_server_spec_rejects_invalid_hostname_pattern(value):
+    with pytest.raises(ValidationError):
+        ServerSpec(**_base_spec_dict(hostname=value))
+
+
+# --- user の文字種制約 ---
+
+
+@pytest.mark.parametrize("value", ["ubuntu", "_svc", "web-1", "a" * 32])
+def test_server_spec_accepts_valid_user_pattern(value):
+    spec = ServerSpec(**_base_spec_dict(user=value))
+    assert spec.user == value
+
+
+@pytest.mark.parametrize(
+    "value", ["Ubuntu", "root;rm -rf /", "user name", "9user", "a" * 33]
+)
+def test_server_spec_rejects_invalid_user_pattern(value):
+    with pytest.raises(ValidationError):
+        ServerSpec(**_base_spec_dict(user=value))
+
+
+# --- memory/vcpus/disk の正数制約 ---
+
+
+@pytest.mark.parametrize("field", ["memory", "vcpus", "disk"])
+@pytest.mark.parametrize("value", [0, -1])
+def test_server_spec_rejects_non_positive_numeric_fields(field, value):
+    with pytest.raises(ValidationError):
+        ServerSpec(**_base_spec_dict(**{field: value}))
+
+
 # --- startup_script ---
 
 

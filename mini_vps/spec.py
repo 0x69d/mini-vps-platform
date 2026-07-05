@@ -13,6 +13,15 @@ from pydantic import BaseModel, Field, model_validator
 
 from .startup_scripts import STARTUP_SCRIPT_NAMES
 
+# name/network/hostname 用。libvirt domain XML(str.format())やファイルパスへ
+# そのまま埋め込まれるため、XML メタ文字・パス区切り・シェルメタ文字を一切許さない
+# (RFC1123 ホスト名ラベル相当: 英数字始まり、英数字/ハイフン/アンダースコア、63文字以内)
+_NAME_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$"
+
+# user 用。startup_scripts.py の cloud-init runcmd(シェルコマンド文字列)へ未クォートで
+# 展開されるため、Debian/Ubuntu の adduser が許容する POSIX ユーザー名の慣例に合わせる。
+_USERNAME_PATTERN = r"^[a-z_][a-z0-9_-]{0,31}$"
+
 
 class FilterRule(BaseModel):
     """inbound 許可ルール1件(単一ポート・単一プロトコル)。"""
@@ -28,13 +37,13 @@ class ServerSpecInput(BaseModel):
     定義を兼ねる。
     """
 
-    memory: int
-    vcpus: int
+    memory: int = Field(gt=0)
+    vcpus: int = Field(gt=0)
     base_image: str
-    disk: int
-    hostname: str | None = None
-    user: str = "ubuntu"
-    network: str = "default"
+    disk: int = Field(gt=0)
+    hostname: str | None = Field(default=None, pattern=_NAME_PATTERN)
+    user: str = Field(default="ubuntu", pattern=_USERNAME_PATTERN)
+    network: str = Field(default="default", pattern=_NAME_PATTERN)
     # None: フィルタ無し(全許可)。[]: 意図的な全 inbound 拒否。
     filters: list[FilterRule] | None = None
     # 初回起動時に適用する cloud-init テンプレート名。非秘匿のため metadata への
@@ -61,7 +70,7 @@ class ServerSpec(ServerSpecInput):
     hostname 未指定時は name で補完する(従来の load_spec の挙動を踏襲)。
     """
 
-    name: str
+    name: str = Field(pattern=_NAME_PATTERN)
 
     @model_validator(mode="after")
     def _default_hostname(self) -> ServerSpec:

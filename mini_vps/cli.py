@@ -282,7 +282,7 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
     try:
         app(args=argv, obj=factory)
     except SystemExit as e:
-        return e.code
+        return e.code if isinstance(e.code, int) else 1
     return 0
 
 

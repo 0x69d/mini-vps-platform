@@ -51,14 +51,14 @@ disk: 10                      # GB
 
 | キー | 型 | 必須/任意 | デフォルト |
 |---|---|---|---|
-| `name` | str | 必須（CLI/YAML）。API は URL パスから与える | — |
-| `memory` | int (MB) | 必須 | — |
-| `vcpus` | int | 必須 | — |
+| `name` | str（英数字・`-`・`_`、先頭は英数字、63文字以内） | 必須（CLI/YAML）。API は URL パスから与える | — |
+| `memory` | int (MB, 正の整数) | 必須 | — |
+| `vcpus` | int (正の整数) | 必須 | — |
 | `base_image` | str | 必須 | — |
-| `disk` | int (GB) | 必須 | — |
-| `hostname` | str | 任意 | 未指定なら `name` で補完 |
-| `user` | str | 任意 | `ubuntu` |
-| `network` | str | 任意 | `default` |
+| `disk` | int (GB, 正の整数) | 必須 | — |
+| `hostname` | str（`name` と同じ文字種制約） | 任意 | 未指定なら `name` で補完 |
+| `user` | str（小文字・数字・`-`・`_`、先頭は小文字かアンダースコア、32文字以内） | 任意 | `ubuntu` |
+| `network` | str（`name` と同じ文字種制約） | 任意 | `default` |
 | `filters` | list[FilterRule] \| null | 任意 | 未指定(null)なら全 inbound 許可。`[]` を明示すると全 inbound 拒否 |
 | `startup_script` | str \| null | 任意 | 未指定(null)。指定する場合は既知のテンプレート名のみ許可([docs/startup-scripts.md](docs/startup-scripts.md) 参照) |
 
