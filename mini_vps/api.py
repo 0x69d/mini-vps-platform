@@ -129,16 +129,7 @@ def put_server(
     """VM を宣言的・冪等に作成/収束する。
 
     新規作成なら 201、既存 spec と一致する no-op なら 200。spec 相違や管理外の
-    同名 domain は 409(ServerConflict)。
-
-    Args:
-        name: URL パスから与える VM 名。
-        body: name を除く spec と、startup_script に渡す secrets。
-        response: 201/200 を出し分けるための Response。
-        mgr: 共有 ServerManager。
-
-    Returns:
-        spec と status をキーに持つ dict。
+    同名 domain は 409(ServerConflict)。body は name を除く spec と secrets。
     """
     # 201/200 の判定は create が name ロック内で原子的に行う(created を返す)。
     # ハンドラ側で事前 get すると並行 2 本が共に created=True になり破綻するため避ける。

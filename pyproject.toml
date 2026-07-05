@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mini-vps-platform"
 version = "0.1.0"
-description = "Add your description here"
+description = "QEMU/KVM + libvirt を使った単一ホスト向けの小さな VM 制御プレーン"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

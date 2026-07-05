@@ -31,10 +31,15 @@ spec(YAML/JSON) → parse → XML → libvirt define/start という一方向の
 - **`spec.py`** — 検証の真実源。Pydantic モデル `FilterRule` / `ServerSpecInput`(name 無し) /
   `ServerSpec`(name 付き, `hostname` 未指定なら `name` で補完)。`load_spec`(YAML)・`read_pubkey`。
   YAML(CLI) と JSON(API) の両入口をこの 1 モデルに収束させる設計を壊さないこと。
-- **`manager.py`** — `ServerManager`。`name` を主キーに操作する管理層。`name` 単位ロックで
-  create/delete/reinstall を直列化して TOCTOU を防ぐ。read(get/list/status)はロックを取らない
+- **`startup_scripts.py`** — 名前付き cloud-init テンプレート。テンプレート名から
+  `write_files`/`runcmd` フラグメントを組み立てる。秘密情報(secrets)はここでのみ user-data へ
+  展開され、spec/metadata には一切載せない。例外 `StartupScriptError`。
+- **`manager.py`** — `ServerManager`。`name` を主キーに操作する管理層。書き込み系操作
+  (create/delete/start/stop/restart/reinstall)を `name` 単位ロックで直列化して TOCTOU を防ぐ。
+  read(get/list/status)はロックを取らない
   (`create()` がロック内で `self.get()` を呼ぶため、read にロックを足すと非再帰 Lock で自己デッドロックする)。
-  spec は libvirt `<metadata>` に埋め込み、自前 DB を持たない。例外 `ServerNotFound`/`ServerConflict`。
+  spec は libvirt `<metadata>` に埋め込み、自前 DB を持たない。
+  例外 `ServerNotFound`/`ServerConflict`/`ServerNotRunning`。
 - **`lifecycle.py`** — `provision` / `teardown` / `wait_for_ip` / `ensure_network_active`。
 - **`resources.py`** — pool / overlay volume / seed ISO / domain XML / nwfilter XML の生成。
   純粋関数(`build_domain_xml`・`build_nwfilter_xml`・`_filter_name`)と、libvirt/subprocess を伴う関数が同居。
@@ -55,7 +60,8 @@ spec(YAML/JSON) → parse → XML → libvirt define/start という一方向の
 
 ## テスト方針
 
-外部依存ゼロの純粋関数は素の値でテストする(`spec.py` の検証ロジック・`resources.py` の
+外部依存ゼロの純粋関数は素の値でテストする(`spec.py` の検証ロジック・`startup_scripts.py` の
+テンプレート組み立て・`resources.py` の
 `build_domain_xml`/`build_nwfilter_xml`/`_filter_name`・`exporter.py` の `_parse_domain_stats`)。
 libvirt 接続・subprocess に依存する関数は `unittest.mock`(`MagicMock`/`monkeypatch`)で
 外部呼び出しを差し替えてユニットテスト化する(`manager.py`・`lifecycle.py`・`resources.py` の残り・

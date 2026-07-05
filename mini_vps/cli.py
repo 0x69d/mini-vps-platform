@@ -73,16 +73,7 @@ def _parse_startup_params(pairs: list[str]) -> dict[str, str]:
     """--startup-param の KEY=VALUE 文字列のリストを dict に変換する。
 
     値側に "=" を含みうる(base64 トークン等)ため、str.split ではなく
-    先頭の1つだけ分割する str.partition を使う。
-
-    Args:
-        pairs: "KEY=VALUE" 形式の文字列のリスト。
-
-    Returns:
-        変換した secrets の dict。
-
-    Raises:
-        StartupScriptError: "KEY=VALUE" 形式でない要素がある場合。
+    先頭の1つだけ分割する str.partition を使う。形式不正は StartupScriptError。
     """
     secrets: dict[str, str] = {}
     for pair in pairs:
@@ -96,12 +87,7 @@ def _parse_startup_params(pairs: list[str]) -> dict[str, str]:
 
 
 def _print_result(result) -> None:
-    """ハンドラの戻り値を種類に応じた形式で標準出力へ書く。
-
-    Args:
-        result: str ならそのまま、list ならVM名を1行ずつ、それ以外(dict)は
-            JSON として出力する。
-    """
+    """ハンドラの戻り値を種類に応じた形式(str/1行ずつ/JSON)で標準出力へ書く。"""
     if isinstance(result, str):
         print(result)
     elif isinstance(result, list):
@@ -118,12 +104,6 @@ def _run_command(func):
     「HTTP ステータス」ではなく「終了コード」へ変換する。引数不足など
     純粋な Typer の使用法エラーはここでは扱わず、Typer の既定動作
     (終了コード2, Usage 表示)に委ねる。
-
-    Args:
-        func: ctx: typer.Context を第一引数に取るコマンド関数。
-
-    Returns:
-        例外捕捉と _print_result による出力整形を行うラップ済み関数。
     """
 
     @functools.wraps(func)
@@ -151,15 +131,7 @@ def _run_command(func):
 
 
 def _command(name: str, *, help: str):
-    """`_run_command` を必ず適用したうえで `app.command` に登録する。
-
-    Args:
-        name: サブコマンド名。
-        help: `--help` に表示する説明文。
-
-    Returns:
-        コマンド関数に適用するデコレータ。
-    """
+    """`_run_command` を必ず適用したうえで `app.command` に登録するデコレータ。"""
 
     def decorator(func):
         return app.command(name, help=help)(_run_command(func))
@@ -173,16 +145,7 @@ def _cmd_create(
     spec_file: Annotated[str, typer.Argument(help="VM スペックの YAML ファイルパス")],
     startup_param: _StartupParamOption = [],
 ) -> dict:
-    """VM スペックの YAML ファイルから VM を宣言的・冪等に作成する。
-
-    Args:
-        ctx: ServerManager を保持する Typer コンテキスト(ctx.obj)。
-        spec_file: VM スペックの YAML ファイルパス。
-        startup_param: --startup-param の KEY=VALUE 文字列のリスト。
-
-    Returns:
-        spec と status をキーに持つ dict。
-    """
+    """VM スペックの YAML ファイルから VM を宣言的・冪等に作成する。"""
     with open(spec_file, encoding="utf-8") as f:
         spec = load_spec(f.read())
     secrets = _parse_startup_params(startup_param)
@@ -216,31 +179,19 @@ def _cmd_start(ctx: typer.Context, name: str) -> dict:
 
 @_command("stop", help="VM を停止する")
 def _cmd_stop(ctx: typer.Context, name: str, force: _ForceOption = False) -> dict:
-    """指定 VM を停止する(停止中なら冪等に no-op)。
-
-    既定はゲスト OS への ACPI 経由の正常シャットダウンで、実際に shutoff になる
-    まで待たない。--force 指定時は即座に強制停止する。
-    """
+    """指定 VM を停止する(停止中なら冪等に no-op。挙動は ServerManager.stop 参照)。"""
     return ctx.obj.stop(name, force=force)
 
 
 @_command("restart", help="VM を再起動する(disk は保持する)")
 def _cmd_restart(ctx: typer.Context, name: str, force: _ForceOption = False) -> dict:
-    """指定 VM を再起動する。reinstall と異なり disk・spec・IP は変更しない。
-
-    既定はゲスト OS への ACPI 経由の正常再起動。--force 指定時は電源断→起動に
-    よる強制再起動を行う。
-    """
+    """指定 VM を再起動する(disk・spec・IP は保持。ServerManager.restart 参照)。"""
     return ctx.obj.restart(name, force=force)
 
 
 @_command("delete", help="管理対象の VM を削除する")
 def _cmd_delete(ctx: typer.Context, name: str) -> str:
-    """管理対象の VM を削除する。
-
-    Returns:
-        表示用の完了メッセージ。
-    """
+    """管理対象の VM を削除する。"""
     ctx.obj.delete(name)
     return f"deleted: {name}"
 
@@ -253,8 +204,8 @@ def _cmd_reinstall(
 ) -> dict:
     """指定 VM の disk を作り直し、同じ spec で再起動する。
 
-    spec["startup_script"] の秘密情報は metadata に永続化されないため、
-    テンプレートを再度効かせたい場合は --startup-param を渡し直す必要がある。
+    secrets は永続化されないため --startup-param は毎回渡し直す
+    (ServerManager.reinstall 参照)。
     """
     secrets = _parse_startup_params(startup_param)
     return ctx.obj.reinstall(name, secrets=secrets or None)

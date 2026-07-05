@@ -25,13 +25,6 @@ def _render_opencode_sakura_ai_engine(spec: dict, secrets: dict[str, str]) -> di
     対象ユーザーはまだ存在しない。よって root 所有のステージング先に書き出し、
     runcmd(ユーザー作成後)で対象ユーザーのホームへ移動・chown する。
 
-    Args:
-        spec: VM スペックの dict。user キーを参照する。
-        secrets: 秘密情報の dict。AI_ENGINE_TOKEN キーが必須。
-
-    Returns:
-        write_files と runcmd をキーに持つ cloud-init フラグメントの dict。
-
     Raises:
         StartupScriptError: secrets に AI_ENGINE_TOKEN が無い、または空文字の場合。
     """
@@ -108,13 +101,7 @@ def render_startup_script(
 ) -> dict:
     """テンプレート名から cloud-init フラグメント(write_files/runcmd)を組み立てる。
 
-    Args:
-        name: テンプレート名。STARTUP_SCRIPT_NAMES に含まれる値のみ許可する。
-        spec: VM スペックの dict。
-        secrets: 秘密情報の dict。None は空 dict として扱う。
-
-    Returns:
-        write_files と runcmd をキーに持つ cloud-init フラグメントの dict。
+    secrets の None は空 dict として扱う。
 
     Raises:
         StartupScriptError: 未知のテンプレート名、または必須 secrets キー欠落の場合。

@@ -17,12 +17,7 @@ from .spec import read_pubkey
 
 
 def ensure_network_active(conn, spec) -> None:
-    """VM スペックが参照する network が非アクティブなら起動する。
-
-    Args:
-        conn: libvirt 接続オブジェクト。
-        spec: VM スペックの dict。network キーを参照する(未指定時は "default")。
-    """
+    """VM スペックが参照する network が非アクティブなら起動する。"""
     net = conn.networkLookupByName(spec.get("network", "default"))
     if not net.isActive():
         net.create()
@@ -34,15 +29,6 @@ def provision(conn, spec, secrets: dict[str, str] | None = None) -> libvirt.virD
     nwfilter(任意) → seed → overlay → domain XML → defineXML の順に処理する。
     起動は呼び出し側が行う(起動前に metadata を付与するため)。seed を overlay
     より先に作るのは、secrets 不足を安価に検知するため。
-
-    Args:
-        conn: libvirt 接続オブジェクト。
-        spec: VM スペックの dict。
-        secrets: spec["startup_script"] テンプレートに渡す秘密情報の dict。
-            libvirt の metadata には一切書き込まれない。
-
-    Returns:
-        定義済み(未起動)の libvirt.virDomain オブジェクト。
     """
     ensure_network_active(conn, spec)
 
@@ -71,15 +57,7 @@ def _lease_ipv4(dom: libvirt.virDomain) -> str | None:
 
 
 def wait_for_ip(dom: libvirt.virDomain, timeout=120) -> str | None:
-    """DHCP リースをポーリングし、IPv4 が確定するまで待つ。
-
-    Args:
-        dom: 対象の libvirt.virDomain。
-        timeout: 最大待機秒数。デフォルトは 120 秒。
-
-    Returns:
-        割り当てられた IPv4 アドレス文字列。タイムアウト時は None。
-    """
+    """DHCP リースをポーリングし、IPv4 が確定するまで待つ(タイムアウト時は None)。"""
     start_time = time.time()
     while time.time() - start_time < timeout:
         ip = _lease_ipv4(dom)
@@ -90,13 +68,9 @@ def wait_for_ip(dom: libvirt.virDomain, timeout=120) -> str | None:
 
 
 def teardown(conn, spec) -> None:
-    """VM を後始末する。
+    """VM を後始末する(spec は name キーのみ参照する)。
 
     destroy → undefine → nwfilter 削除 → overlay volume 削除 → seed ISO 削除の順。
-
-    Args:
-        conn: libvirt 接続オブジェクト。
-        spec: VM スペックの dict。name キーのみ参照する。
     """
     # domain
     if spec["name"] in {d.name() for d in conn.listAllDomains()}:

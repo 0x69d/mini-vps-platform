@@ -22,16 +22,9 @@ from .startup_scripts import render_startup_script
 
 
 def ensure_pool(conn, name) -> libvirt.virStoragePool:
-    """ストレージプールが無ければ作成して返す(冪等)。
+    """ストレージプールが無ければ作成し、アクティブ状態で返す(冪等)。
 
     define → build → create → autostart の順にセットアップする。
-
-    Args:
-        conn: libvirt 接続オブジェクト。
-        name: プール名。
-
-    Returns:
-        アクティブ状態の libvirt.virStoragePool。
     """
     pools = {p.name() for p in conn.listAllStoragePools()}
     if name in pools:
@@ -50,13 +43,6 @@ def create_overlay_volume(conn, spec) -> str:
     """専用プールに overlay volume を作成し、そのパスを返す。
 
     base image を backing store として使用する。既存の同名 volume は削除して再作成する。
-
-    Args:
-        conn: libvirt 接続オブジェクト。
-        spec: VM スペックの dict。base_image・name・disk キーを参照する。
-
-    Returns:
-        作成した overlay volume のパス文字列。
     """
     base_pool = conn.storagePoolLookupByName(BASE_POOL)
     base_pool.refresh(0)
@@ -75,18 +61,10 @@ def create_overlay_volume(conn, spec) -> str:
 
 
 def _build_user_data(spec, pubkey, secrets: dict[str, str] | None) -> dict:
-    """cloud-config の dict を組み立てる。
+    """cloud-config の dict(YAML 化前)を組み立てる。
 
     hostname/users は常に含める。spec["startup_script"] が指定されていれば、
     対応するテンプレートをレンダリングして write_files/runcmd を追加する。
-
-    Args:
-        spec: VM スペックの dict。
-        pubkey: SSH 公開鍵の文字列。
-        secrets: startup_script テンプレートに渡す秘密情報の dict。
-
-    Returns:
-        cloud-config の内容を表す dict(YAML化前)。
     """
     data = {
         "hostname": spec["hostname"],
@@ -111,16 +89,7 @@ def build_seed_iso(spec, pubkey, secrets: dict[str, str] | None = None) -> str:
     """Seed ISO を生成してパスを返す。
 
     user-data と meta-data を一時ファイルに書き出し、cloud-localds で
-    {name}-seed.iso を SEED_DIR に生成する。
-
-    Args:
-        spec: VM スペックの dict。
-        pubkey: SSH 公開鍵の文字列。
-        secrets: spec["startup_script"] テンプレートに渡す秘密情報の dict。
-            libvirt の metadata には一切書き込まれず、この user-data 生成にのみ使う。
-
-    Returns:
-        生成した seed ISO のパス文字列。
+    {name}-seed.iso を SEED_DIR に生成する。secrets はこの user-data 生成にのみ使う。
     """
     user_data = "#cloud-config\n" + yaml.safe_dump(
         _build_user_data(spec, pubkey, secrets), sort_keys=False
@@ -161,12 +130,6 @@ def build_nwfilter_xml(spec) -> str:
     """spec["filters"] から VM 専用の nwfilter XML を組み立てて返す。
 
     呼び出し側で spec["filters"] is not None を確認済みであることが前提。
-
-    Args:
-        spec: VM スペックの dict。name・filters キーを参照する。
-
-    Returns:
-        libvirt に渡す nwfilter XML 文字列。
     """
     port_rules = "".join(
         NWFILTER_PORT_RULE_TEMPLATE.format(protocol=f["protocol"], port=f["port"])
@@ -178,14 +141,7 @@ def build_nwfilter_xml(spec) -> str:
 def build_domain_xml(spec, overlay_path, seed_path, filter_name=None) -> str:
     """Domain XML 文字列を組み立てて返す。
 
-    Args:
-        spec: VM スペックの dict。
-        overlay_path: overlay volume のパス文字列。
-        seed_path: seed ISO のパス文字列。
-        filter_name: インターフェースに紐づける nwfilter 名。None なら付けない。
-
-    Returns:
-        libvirt に渡す domain XML 文字列。
+    filter_name はインターフェースに紐づける nwfilter 名(None なら付けない)。
     """
     memory_kib = spec["memory"] * 1024
     filterref = f"<filterref filter='{filter_name}'/>" if filter_name else ""

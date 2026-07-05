@@ -29,13 +29,6 @@ def _parse_domain_stats(raw: dict) -> dict:
 
     停止中(shutoff)ドメインは state 以外のキーがほとんど入らないため、
     全フィールドを `.get()` で取り出し、欠損時は None または空 list で返す。
-
-    Args:
-        raw: virConnect.getAllDomainStats() が返す typed parameter dict。
-
-    Returns:
-        state・is_running・cpu_time_seconds・memory_current_bytes・
-        memory_maximum_bytes・interfaces・disks をキーに持つ dict。
     """
     state_code = raw.get("state.state")
     cpu_time_ns = raw.get("cpu.time")
@@ -80,11 +73,7 @@ def _parse_domain_stats(raw: dict) -> dict:
 
 
 def _default_manager_factory() -> ServerManager:
-    """既定の接続先(LIBVIRT_URI)に接続した ServerManager を生成する。
-
-    Returns:
-        新しい libvirt 接続を持つ ServerManager。
-    """
+    """既定の接続先(LIBVIRT_URI)に接続した ServerManager を生成する。"""
     return ServerManager(libvirt.open(LIBVIRT_URI))
 
 
@@ -119,9 +108,6 @@ class DomainCollector:
         `minivps_exporter_scrape_success` を 0 にして VM メトリクスを出さない
         (Prometheus 側で `absent()` や `scrape_success == 0` の条件が書ける)。
         スクレイプ中に消えた domain は 1 台単位でスキップする。
-
-        Yields:
-            prometheus_client の MetricFamily。
         """
         scrape_success = GaugeMetricFamily(
             "minivps_exporter_scrape_success",
