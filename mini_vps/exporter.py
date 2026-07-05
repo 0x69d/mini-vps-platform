@@ -79,11 +79,34 @@ def _parse_domain_stats(raw: dict) -> dict:
     }
 
 
-class DomainCollector:
-    """管理対象 VM の統計を Prometheus メトリクスとして公開する Collector。"""
+def _default_manager_factory() -> ServerManager:
+    """既定の接続先(LIBVIRT_URI)に接続した ServerManager を生成する。
 
-    def __init__(self, mgr: ServerManager):
-        self._mgr = mgr
+    Returns:
+        新しい libvirt 接続を持つ ServerManager。
+    """
+    return ServerManager(libvirt.open(LIBVIRT_URI))
+
+
+class DomainCollector:
+    """管理対象 VM の統計を Prometheus メトリクスとして公開する Collector。
+
+    libvirt 接続はスクレイプ時に遅延生成し、libvirtError 発生時は接続を
+    破棄して次回スクレイプで再接続する(libvirtd 再起動からの自動復旧)。
+    """
+
+    def __init__(self, manager_factory=_default_manager_factory):
+        self._manager_factory = manager_factory
+        self._mgr: ServerManager | None = None
+
+    def _drop_manager(self) -> None:
+        """壊れた可能性のある接続を破棄し、次回スクレイプで再接続させる。"""
+        if self._mgr is not None:
+            try:
+                self._mgr.conn.close()
+            except libvirt.libvirtError:
+                pass
+            self._mgr = None
 
     def collect(self):
         """管理対象 VM ごとのメトリクスファミリーを生成する。
@@ -92,9 +115,18 @@ class DomainCollector:
         getAllDomainStats() の結果を domain ごとに直接フィルタする(list() による
         事前の全件列挙を挟まないことで、二重列挙とその間の TOCTOU を避ける)。
 
+        libvirt との通信に失敗した場合は例外を伝播させず、
+        `minivps_exporter_scrape_success` を 0 にして VM メトリクスを出さない
+        (Prometheus 側で `absent()` や `scrape_success == 0` の条件が書ける)。
+        スクレイプ中に消えた domain は 1 台単位でスキップする。
+
         Yields:
             prometheus_client の MetricFamily。
         """
+        scrape_success = GaugeMetricFamily(
+            "minivps_exporter_scrape_success",
+            "1 if the last scrape of libvirt succeeded, 0 otherwise",
+        )
         up = GaugeMetricFamily(
             "minivps_vm_up", "1 if the VM is running, 0 otherwise", labels=["vm"]
         )
@@ -156,10 +188,25 @@ class DomainCollector:
             labels=["vm", "device"],
         )
 
-        for dom, raw in self._mgr.conn.getAllDomainStats():
-            if not self._mgr.is_managed(dom):
+        try:
+            if self._mgr is None:
+                self._mgr = self._manager_factory()
+            all_stats = self._mgr.conn.getAllDomainStats()
+        except libvirt.libvirtError:
+            self._drop_manager()
+            scrape_success.add_metric([], 0.0)
+            yield scrape_success
+            return
+
+        for dom, raw in all_stats:
+            # getAllDomainStats() 取得後に delete された domain への
+            # metadata()/name() は失敗するため、その 1 台だけスキップする。
+            try:
+                if not self._mgr.is_managed(dom):
+                    continue
+                name = dom.name()
+            except libvirt.libvirtError:
                 continue
-            name = dom.name()
 
             parsed = _parse_domain_stats(raw)
 
@@ -189,6 +236,8 @@ class DomainCollector:
                 disk_rd_requests.add_metric(labels, disk["rd_reqs"])
                 disk_wr_requests.add_metric(labels, disk["wr_reqs"])
 
+        scrape_success.add_metric([], 1.0)
+        yield scrape_success
         yield up
         yield state
         yield vcpus
@@ -211,9 +260,7 @@ def main() -> None:
     addr = os.environ.get(_ADDR_ENV_VAR, _DEFAULT_ADDR)
 
     register_quiet_error_handler()
-    conn = libvirt.open(LIBVIRT_URI)
-    mgr = ServerManager(conn)
-    REGISTRY.register(DomainCollector(mgr))
+    REGISTRY.register(DomainCollector())
 
     start_http_server(port, addr=addr)
     threading.Event().wait()
