@@ -97,6 +97,22 @@ def test_build_domain_xml_passes_through_host_cpu_features():
     assert "<cpu mode='host-model'/>" in xml
 
 
+def test_build_domain_xml_uses_uefi_firmware_and_q35_machine():
+    xml = build_domain_xml(_spec(), "/overlay.qcow2", "/seed.iso")
+    assert "<os firmware='efi'>" in xml
+    assert "<loader secure='no'/>" in xml
+    assert "machine='q35'" in xml
+
+
+def test_build_domain_xml_includes_rng_clock_pm_and_discard():
+    xml = build_domain_xml(_spec(), "/overlay.qcow2", "/seed.iso")
+    assert "<rng model='virtio'>" in xml
+    assert "<clock offset='utc'/>" in xml
+    assert "<suspend-to-mem enabled='no'/>" in xml
+    assert "<suspend-to-disk enabled='no'/>" in xml
+    assert "discard='unmap'" in xml
+
+
 def test_build_domain_xml_defaults_network_when_absent():
     spec = _spec()
     del spec["network"]
