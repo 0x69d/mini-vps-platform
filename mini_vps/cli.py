@@ -42,6 +42,12 @@ _StartupParamOption = Annotated[
     ),
 ]
 
+# stop/restart で共有する --force オプションの型。
+_ForceOption = Annotated[
+    bool,
+    typer.Option("--force", help="ACPI を待たず即座に強制する"),
+]
+
 
 @contextlib.contextmanager
 def _open_manager():
@@ -196,6 +202,32 @@ def _cmd_list(ctx: typer.Context) -> list[str]:
 def _cmd_status(ctx: typer.Context, name: str) -> dict:
     """指定 VM の状態(state, ip)を返す。"""
     return ctx.obj.status(name)
+
+
+@_command("start", help="VM を起動する")
+def _cmd_start(ctx: typer.Context, name: str) -> dict:
+    """指定 VM を起動する(起動中なら冪等に no-op)。"""
+    return ctx.obj.start(name)
+
+
+@_command("stop", help="VM を停止する")
+def _cmd_stop(ctx: typer.Context, name: str, force: _ForceOption = False) -> dict:
+    """指定 VM を停止する(停止中なら冪等に no-op)。
+
+    既定はゲスト OS への ACPI 経由の正常シャットダウンで、実際に shutoff になる
+    まで待たない。--force 指定時は即座に強制停止する。
+    """
+    return ctx.obj.stop(name, force=force)
+
+
+@_command("restart", help="VM を再起動する(disk は保持する)")
+def _cmd_restart(ctx: typer.Context, name: str, force: _ForceOption = False) -> dict:
+    """指定 VM を再起動する。reinstall と異なり disk・spec・IP は変更しない。
+
+    既定はゲスト OS への ACPI 経由の正常再起動。--force 指定時は電源断→起動に
+    よる強制再起動を行う。
+    """
+    return ctx.obj.restart(name, force=force)
 
 
 @_command("delete", help="管理対象の VM を削除する")

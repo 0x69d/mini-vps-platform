@@ -331,6 +331,183 @@ def test_delete_raises_not_found_when_unmanaged(monkeypatch):
     teardown_mock.assert_not_called()
 
 
+# --- ServerManager.start ---
+
+
+def test_start_creates_inactive_domain(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    spec = {"name": "web-1"}
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: spec)
+    ensure_network_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager.ensure_network_active", ensure_network_mock)
+    mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
+
+    mgr.start("web-1")
+
+    ensure_network_mock.assert_called_once_with(conn, spec)
+    dom.create.assert_called_once()
+
+
+def test_start_is_noop_when_already_active(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = True
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+    ensure_network_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager.ensure_network_active", ensure_network_mock)
+    mgr.get = MagicMock(return_value={"spec": {}, "status": {}})
+
+    mgr.start("web-1")
+
+    ensure_network_mock.assert_not_called()
+    dom.create.assert_not_called()
+
+
+def test_start_raises_not_found_when_unmanaged(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+
+    def _raise_not_found(c, n):
+        raise ServerNotFound(n)
+
+    monkeypatch.setattr("mini_vps.manager._lookup", _raise_not_found)
+
+    with pytest.raises(ServerNotFound):
+        mgr.start("web-1")
+
+
+# --- ServerManager.stop ---
+
+
+def test_stop_shuts_down_active_domain_by_default(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = True
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+    mgr.get = MagicMock(return_value={"spec": {}, "status": {}})
+
+    mgr.stop("web-1")
+
+    dom.shutdown.assert_called_once()
+    dom.destroy.assert_not_called()
+
+
+def test_stop_destroys_active_domain_when_forced(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = True
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+    mgr.get = MagicMock(return_value={"spec": {}, "status": {}})
+
+    mgr.stop("web-1", force=True)
+
+    dom.destroy.assert_called_once()
+    dom.shutdown.assert_not_called()
+
+
+def test_stop_is_noop_when_already_inactive(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+    mgr.get = MagicMock(return_value={"spec": {}, "status": {}})
+
+    mgr.stop("web-1", force=True)
+
+    dom.shutdown.assert_not_called()
+    dom.destroy.assert_not_called()
+
+
+def test_stop_raises_not_found_when_unmanaged(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+
+    def _raise_not_found(c, n):
+        raise ServerNotFound(n)
+
+    monkeypatch.setattr("mini_vps.manager._lookup", _raise_not_found)
+
+    with pytest.raises(ServerNotFound):
+        mgr.stop("web-1")
+
+
+# --- ServerManager.restart ---
+
+
+def test_restart_reboots_by_default(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+    mgr.get = MagicMock(return_value={"spec": {}, "status": {}})
+
+    mgr.restart("web-1")
+
+    dom.reboot.assert_called_once()
+    dom.destroy.assert_not_called()
+    dom.create.assert_not_called()
+
+
+def test_restart_destroys_then_creates_active_domain_when_forced(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = True
+    spec = {"name": "web-1"}
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: spec)
+    ensure_network_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager.ensure_network_active", ensure_network_mock)
+    mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
+
+    mgr.restart("web-1", force=True)
+
+    dom.destroy.assert_called_once()
+    ensure_network_mock.assert_called_once_with(conn, spec)
+    dom.create.assert_called_once()
+    dom.reboot.assert_not_called()
+
+
+def test_restart_skips_destroy_for_inactive_domain_when_forced(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    spec = {"name": "web-1"}
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: spec)
+    ensure_network_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager.ensure_network_active", ensure_network_mock)
+    mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
+
+    mgr.restart("web-1", force=True)
+
+    dom.destroy.assert_not_called()
+    ensure_network_mock.assert_called_once_with(conn, spec)
+    dom.create.assert_called_once()
+
+
+def test_restart_raises_not_found_when_unmanaged(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+
+    def _raise_not_found(c, n):
+        raise ServerNotFound(n)
+
+    monkeypatch.setattr("mini_vps.manager._lookup", _raise_not_found)
+
+    with pytest.raises(ServerNotFound):
+        mgr.restart("web-1")
+
+
 # --- ServerManager.reinstall ---
 
 
