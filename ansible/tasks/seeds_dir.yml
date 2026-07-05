@@ -1,0 +1,8 @@
+- name: seeds ディレクトリを作成する
+  become: true
+  ansible.builtin.file:
+    path: "{{ seed_dir }}"
+    state: directory
+    owner: "{{ vps_user }}"
+    group: libvirt
+    mode: "0775"

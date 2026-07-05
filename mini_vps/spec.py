@@ -80,7 +80,9 @@ SAMPLE_SPEC = load_sample_spec()
 
 
 def read_pubkey() -> str:
-    """SSH 公開鍵を ~/.ssh/id_ed25519.pub から読み込んで返す。
+    """SSH 公開鍵を ~/.ssh/minivps_ed25519.pub から読み込んで返す。
+
+    ユーザーの個人鍵(id_ed25519 等)とは別に、本ツール専用の鍵を使う。
 
     Returns:
         公開鍵の文字列(末尾の改行を除去済み)。
@@ -88,7 +90,7 @@ def read_pubkey() -> str:
     Raises:
         FileNotFoundError: 公開鍵ファイルが存在しない場合。
     """
-    pubkey_path = pathlib.Path.home() / ".ssh" / "id_ed25519.pub"
+    pubkey_path = pathlib.Path.home() / ".ssh" / "minivps_ed25519.pub"
     with pubkey_path.open("r") as f:
         pubkey = f.read().strip()
     return pubkey

@@ -5,7 +5,7 @@ import time
 
 import libvirt
 
-from .config import LAB_DIR, POOL_NAME
+from .config import POOL_NAME, SEED_DIR
 from .resources import (
     _filter_name,
     build_domain_xml,
@@ -120,6 +120,6 @@ def teardown(conn, spec) -> None:
             pool.storageVolLookupByName(vol_name).delete(0)
 
     # seed
-    seed_path = f"{LAB_DIR}/{spec['name']}-seed.iso"
+    seed_path = f"{SEED_DIR}/{spec['name']}-seed.iso"
     if os.path.exists(seed_path):
         os.remove(seed_path)

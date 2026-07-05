@@ -1,0 +1,38 @@
+- name: パッケージを導入する(Debian系)
+  become: true
+  ansible.builtin.apt:
+    name:
+      - libvirt-daemon-system
+      - libvirt-clients
+      - qemu-system-x86
+      - qemu-utils
+      - cloud-image-utils
+      - libvirt-dev
+      - python3-dev
+      - pkg-config
+      - build-essential
+      - ebtables
+      - iptables
+      - arptables
+    state: present
+    update_cache: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: パッケージを導入する(RedHat系)
+  become: true
+  ansible.builtin.dnf:
+    name:
+      - libvirt
+      - libvirt-client
+      - qemu-kvm
+      - qemu-img
+      - cloud-utils
+      - libvirt-devel
+      - python3-devel
+      - pkgconf-pkg-config
+      - gcc
+      - ebtables
+      - iptables
+      - arptables
+    state: present
+  when: ansible_facts['os_family'] == 'RedHat'

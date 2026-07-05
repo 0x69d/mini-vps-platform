@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from mini_vps.config import LAB_DIR, POOL_NAME
+from mini_vps.config import POOL_NAME, SEED_DIR
 from mini_vps.resources import (
     _filter_name,
     build_domain_xml,
@@ -23,7 +23,7 @@ def _spec(**overrides):
         "user": "ubuntu",
         "memory": 1024,
         "vcpus": 2,
-        "base_image": "ubuntu-noble.img",
+        "base_image": "ubuntu-24.04.img",
         "disk": 10,
         "network": "default",
     }
@@ -204,7 +204,7 @@ def test_build_seed_iso_writes_expected_cloud_init_content(monkeypatch):
     assert captured["cmd"][0] == "cloud-localds"
     assert "ssh-ed25519 AAAA..." in captured["user_data"]
     assert "web-1" in captured["meta_data"]
-    assert seed_path == f"{LAB_DIR}/web-1-seed.iso"
+    assert seed_path == f"{SEED_DIR}/web-1-seed.iso"
 
 
 def test_build_seed_iso_deletes_existing_seed_before_recreate(monkeypatch):

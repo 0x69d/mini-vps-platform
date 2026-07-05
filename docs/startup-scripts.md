@@ -36,7 +36,7 @@ Web API: `PUT /servers/{name}` の JSON body に `secrets` フィールドを足
 {
   "memory": 1024,
   "vcpus": 2,
-  "base_image": "ubuntu-noble.img",
+  "base_image": "ubuntu-24.04.img",
   "disk": 10,
   "startup_script": "opencode-sakura-ai-engine",
   "secrets": { "AI_ENGINE_TOKEN": "<トークン>" }

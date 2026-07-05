@@ -12,7 +12,7 @@ SPEC_YAML = """\
 name: web-1
 memory: 1024
 vcpus: 2
-base_image: ubuntu-noble.img
+base_image: ubuntu-24.04.img
 disk: 10
 """
 
