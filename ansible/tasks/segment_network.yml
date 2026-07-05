@@ -1,0 +1,50 @@
+# セグメント1件分の NAT ネットワークを冪等に用意する。
+# playbook 側の include_tasks + loop(loop_var: segment)から呼ばれる前提。
+- name: "ネットワークの状態を確認する: {{ segment.name }}"
+  ansible.builtin.command: "virsh net-info {{ segment.name }}"
+  register: minivps_segment_net_info
+  changed_when: false
+  failed_when: false
+
+- name: "ネットワーク定義XMLの一時ファイルを準備する: {{ segment.name }}"
+  ansible.builtin.tempfile:
+    state: file
+    suffix: .xml
+  register: minivps_segment_net_xml_tmp
+  when: minivps_segment_net_info.rc != 0
+
+- name: "ネットワーク定義XMLをレンダリングする: {{ segment.name }}"
+  ansible.builtin.template:
+    src: templates/nat-segment.xml.j2
+    dest: "{{ minivps_segment_net_xml_tmp.path }}"
+    mode: "0644"
+  when: minivps_segment_net_info.rc != 0
+
+- name: "ネットワークを定義する: {{ segment.name }}"
+  become: true
+  ansible.builtin.command: "virsh net-define {{ minivps_segment_net_xml_tmp.path }}"
+  when: minivps_segment_net_info.rc != 0
+  changed_when: true
+
+- name: "ネットワーク定義XMLの一時ファイルを削除する: {{ segment.name }}"
+  ansible.builtin.file:
+    path: "{{ minivps_segment_net_xml_tmp.path }}"
+    state: absent
+  when: minivps_segment_net_info.rc != 0
+
+- name: "ネットワークの状態を再確認する: {{ segment.name }}"
+  ansible.builtin.command: "virsh net-info {{ segment.name }}"
+  register: minivps_segment_net_info2
+  changed_when: false
+
+- name: "ネットワークを起動する(非アクティブの場合): {{ segment.name }}"
+  become: true
+  ansible.builtin.command: "virsh net-start {{ segment.name }}"
+  when: minivps_segment_net_info2.stdout is not search('Active:\s+yes')
+  changed_when: true
+
+- name: "ネットワークの autostart を有効にする(未設定の場合): {{ segment.name }}"
+  become: true
+  ansible.builtin.command: "virsh net-autostart {{ segment.name }}"
+  when: minivps_segment_net_info2.stdout is not search('Autostart:\s+yes')
+  changed_when: true

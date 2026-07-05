@@ -1,0 +1,10 @@
+<network>
+  <name>{{ segment.name }}</name>
+  <forward mode='nat'/>
+  <bridge name='{{ segment.bridge }}' stp='on' delay='0'/>
+  <ip address='{{ segment.gateway }}' netmask='{{ segment.netmask }}'>
+    <dhcp>
+      <range start='{{ segment.dhcp_start }}' end='{{ segment.dhcp_end }}'/>
+    </dhcp>
+  </ip>
+</network>

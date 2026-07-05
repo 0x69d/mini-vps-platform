@@ -1,0 +1,19 @@
+# VM セグメント用の独立 NAT ネットワーク定義(tasks/segment_network.yml が参照)。
+# ポリシー: セグメント間は相互遮断、各セグメントから外向き NAT は許可。
+# default ネットワーク(virbr0 / 192.168.122.0/24)はここに含めず、
+# tasks/network.yml(ディストリ同梱 XML)で従来どおり管理する。
+# 制約: name は VM spec の network フィールドの文字種制約(英数字始まり・
+# 英数字/ハイフン/アンダースコア・63文字以内)、bridge は 15 文字以内(IFNAMSIZ)。
+network_segments:
+  - name: seg-a
+    bridge: virbr-sega
+    gateway: 192.168.124.1
+    netmask: 255.255.255.0
+    dhcp_start: 192.168.124.2
+    dhcp_end: 192.168.124.254
+  - name: seg-b
+    bridge: virbr-segb
+    gateway: 192.168.125.1
+    netmask: 255.255.255.0
+    dhcp_start: 192.168.125.2
+    dhcp_end: 192.168.125.254
