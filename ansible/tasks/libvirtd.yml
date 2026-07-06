@@ -23,12 +23,22 @@
     - libvirtd-admin.socket
   when: ansible_facts['os_family'] == 'RedHat'
 
-- name: virtqemud を起動・自動起動を有効にする(RedHat系)
+# qemu/network/storage/nwfilter の4ドライバは本プロジェクトが実際に使う
+# (domain XML・NAT ネットワーク・pool/volume・パケットフィルタ)。ディストリの
+# 既定でソケットが有効化されている前提を置かず、明示的に有効化する
+# (Fedora は既定で有効なため冪等に no-op、AlmaLinux は既定で無効なため
+# net-define 等が virtnetworkd-sock 不在で失敗していた)。
+- name: モジュラーデーモンのソケットを有効化する(RedHat系)
   become: true
-  ansible.builtin.service:
-    name: virtqemud
+  ansible.builtin.systemd:
+    name: "{{ item }}"
     state: started
     enabled: true
+  loop:
+    - virtqemud.socket
+    - virtnetworkd.socket
+    - virtstoraged.socket
+    - virtnwfilterd.socket
   when: ansible_facts['os_family'] == 'RedHat'
 
 - name: 実行ユーザーを libvirt グループに追加する
