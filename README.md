@@ -3,42 +3,40 @@
 QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 
 宣言的な YAML 入力を受け取り、ローカルマシン上に仮想サーバーをプロビジョニングする。
-クラウドでいう「コントロールプレーン」の中核——宣言的入力からリソース確保までの翻訳——を自作することを目的とする。
+クラウドでいう「コントロールプレーン」の中核——宣言的入力からリソース確保までの翻訳——を自作する。
 
-## 目的
+## 目的・前提
 
-- YAML で宣言した「欲しいサーバー」を、libvirt の domain として実体化する。
+- ユーザーが宣言した「欲しいサーバー」を、libvirt の domain として実体化する。
 - CLI(YAML)と Web API(JSON)の2つの入口から同じ操作を提供する。
-- 単一ホスト上でローカル完結させる。実機 VPS との接続は前提としない。
-- 並行制御は単一プロセス前提とし、同名への並行 create/delete は `ServerManager` の name 単位ロックで直列化する（複数 worker / プロセス間ロックは対象外）。
+- 単一ホスト上でローカル完結させる。
 
 ## スコープ
 
 ### 含むもの（最小構成）
 
-- `Server` リソース: YAML 定義から libvirt domain を生成・起動・停止・削除する。
-- YAML → domain XML への変換層（Python）。
+- `Server` リソース: YAML / JSON 定義から libvirt domain を生成・起動・停止・削除する。
 - NAT ネットワーク: libvirt の仮想ブリッジ経由でゲストを外向き通信させる。
-- セグメント分離: 複数の独立 NAT ネットワークで VM を隔離する(セグメント間は相互遮断、外向き NAT は許可)。
-- パケットフィルタ: `filters` で宣言した inbound ポートのみ許可する(libvirt nwfilter)。
-- 監視: Prometheus + Grafana によるメトリクス可視化(docker-compose、単一ホスト内完結、外部非公開)。
+- セグメント分離: 複数の独立 NAT ネットワークで VM を隔離する。
+- パケットフィルタ: `filters` で宣言した inbound ポートのみ許可する。
+- 監視: Prometheus + Grafana によってメトリクスを可視化する。
 
 ### 含まないもの
 
 - 複数物理ホストへのスケジューリング。
 - マルチテナンシー、課金、認証などの大規模運用機構。
 - パケットフィルタの IPv6・egress・動的なルール更新 API（inbound・IPv4・作成時適用のみ）。
-- アラート通知(Alertmanager 等)。可視化までが範囲。
+- アラート通知(Alertmanager 等)。
 
 ## アーキテクチャ
 
 ```
-spec.yaml  →  parse  →  内部データ構造  →  XML 生成  →  libvirt define / start
+spec.yaml / spec.json  →  parse  →  内部データ構造  →  XML 生成  →  libvirt define / start
 ```
 
-- **入力**: 人間に優しい YAML。domain XML は手書きせず、変換層で生成する。
-- **ネットワーク**: NAT。ゲストはセグメントごとに独立した仮想ブリッジに接続し、ホストの NAT 経由で外に出る。セグメント間は libvirt がネットワーク単位で投入する FORWARD ルールにより相互遮断される。外部からゲストへの直接到達は想定しない。
-- **実体**: 各 `Server` は libvirt domain に対応する。
+- **入力**: YAML / JSON。domain XML は手書きせず、変換層で生成する。
+- **ネットワーク**: NAT。ゲストはセグメントごとに独立した仮想ブリッジに接続し、ホストの NAT 経由で外に出る。
+- **実体**: 各 VM は libvirt domain に対応する。
 
 ## 最小 YAML スキーマ
 
@@ -52,7 +50,7 @@ disk: 10                      # GB
 
 | キー | 型 | 必須/任意 | デフォルト |
 |---|---|---|---|
-| `name` | str（英数字・`-`・`_`、先頭は英数字、63文字以内） | 必須（CLI/YAML）。API は URL パスから与える | — |
+| `name` | str（英数字・`-`・`_`、先頭は英数字、63文字以内） | CLI（YAML）では必須。API（JSON）では URL パスから与える | — |
 | `memory` | int (MB, 正の整数) | 必須 | — |
 | `vcpus` | int (正の整数) | 必須 | — |
 | `base_image` | str | 必須 | — |
@@ -100,13 +98,12 @@ network: seg1
 ```
 
 **ポリシー**: 同一セグメント内の VM は自由に通信できる。セグメント間は相互遮断され、
-各セグメントから外向き(インターネット方向)は NAT 経由で許可される。
+各セグメントから外向き(インターネット方向)の通信は NAT 経由で許可される。
 
 この遮断に追加のファイアウォール設定は不要である。libvirt は NAT ネットワークの起動時に
 ネットワーク単位の FORWARD ルール(iptables backend では `LIBVIRT_FWI`/`LIBVIRT_FWO`
-チェーン、nftables backend でも同じ意味論)を自動投入し、別ブリッジ宛の新規パケットは
-宛先ネットワーク側の REJECT に当たるため、独立 NAT ネットワークに分けた時点で
-セグメント間通信は遮断される。
+チェーン)を自動投入し、別ブリッジ宛の新規パケットは宛先ネットワーク側の REJECT に当たる
+ため、独立 NAT ネットワークに分けた時点でセグメント間通信は遮断される。
 
 > **注意**: ホスト側で FORWARD チェーンの `LIBVIRT_*` より前に広範な ACCEPT ルールを
 > 手動追加すると、この遮断は崩れる。
@@ -129,10 +126,6 @@ secrets の渡し方・トラブルシューティングは [docs/startup-script
 - [uv](https://docs.astral.sh/uv/)
 - ビルド依存（libvirt-python は PyPI で sdist のみ提供のため、`uv add` 時にソースビルドが走る）: libvirt の開発ヘッダ + Python 開発ヘッダ（`Python.h`）+ pkg-config + C コンパイラ
 
-ゲスト VM の CPU はホストに合わせて選択する(`<cpu mode='host-model'/>`)。未設定だと
-libvirt の既定 CPU モデル(`qemu64`)にフォールバックし、AVX 等の拡張命令が
-ゲストに公開されず、それに依存するソフトウェアがクラッシュすることがある。
-
 ## セットアップ
 
 ### 1. ホスト側の事前設定(Ansible)
@@ -153,14 +146,22 @@ uv run ansible-playbook -i ansible/inventory.ini ansible/playbook.yml --ask-beco
 > playbook 内の `become: true` で昇格するため、パスワードレス sudo でなければ
 > `--ask-become-pass` を付ければ十分。
 
+> **注記**: `sudo` の既定実装が Rust 版(`sudo-rs`)のホストでは、`-p`/`--prompt` の
+> 扱いの違いにより Ansible の become パスワードプロンプト検出が失敗し、
+> `Timed out waiting for become success or become password prompt` で
+> playbook が止まる場合がある([ansible#85837](https://github.com/ansible/ansible/issues/85837)、
+> [sudo-rs#1461](https://github.com/trifectatechfoundation/sudo-rs/issues/1461)、
+> 修正は将来の ansible-core リリースに追従予定)。発生した場合は GNU 版 sudo に
+> 切り替えると回避できる(`sudo update-alternatives --auto sudo` で元に戻せる)。
+>
+> ```bash
+> sudo update-alternatives --set sudo /usr/bin/sudo.ws
+> ```
+
 対応可能なゲスト OS と base image の入手・登録手順は
 [docs/guest-os.md](docs/guest-os.md) を参照。
 
 `libvirt` グループの反映にはシェルの再ログイン(または `newgrp libvirt`)が必要。
-
-パケットフィルタ(nwfilter)はホスト側で ebtables/iptables/arptables ルールを操作するが、
-その処理は root 権限で動く libvirtd デーモンが代行する。呼び出し側ユーザー自身が root で
-ある必要はなく、`libvirt` グループ所属で足りる。
 
 ### 2. Python 依存の同期（uv）
 
@@ -174,8 +175,7 @@ uv sync
 
 ### 3. CLI(YAML)
 
-人間向けの入口。宣言的 YAML を渡して VM を操作する。`uv run mini-vps` または
-`uv run python -m mini_vps` のどちらでも同じ CLI が起動する。
+宣言的 YAML を渡して VM を操作する。`uv run mini-vps` または `uv run python -m mini_vps` のどちらでも同じ CLI が起動する。
 
 ```bash
 uv run mini-vps create mini_vps/vm-spec.yaml
@@ -205,10 +205,6 @@ uv run mini-vps delete web-1
 受け付ける。`startup_script` テンプレートに渡す秘密情報の指定方法は
 [docs/startup-scripts.md](docs/startup-scripts.md) を参照。
 
-`create` で spec が既存と相違、または管理外の同名 domain がある場合は終了コード 3
-(`ServerConflict`)で拒否する。CLI は Web API と同じ `ServerManager` を呼ぶ薄い
-フロントエンドで、どちらの入口を使っても操作結果は変わらない。
-
 `stop`/`restart` の既定はゲスト OS への ACPI 経由の正常なシャットダウン/再起動の
 要求のみで、実際に状態が変わるまで待たない。`--force` 指定時は即座に強制する。
 停止中の VM に `restart`(force 無し)を実行すると終了コード 4(`ServerNotRunning`)
@@ -216,7 +212,7 @@ uv run mini-vps delete web-1
 
 ### 4. Web API(JSON)
 
-機械(フロント・他サービス)向けの入口。宣言的 YAML は CLI 向け、API は JSON で分離する。
+他サービス向けの入口。宣言的 YAML は CLI 向け、API は JSON で分離する。
 
 ```bash
 uv run uvicorn mini_vps.api:app
@@ -236,23 +232,14 @@ OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
 | `DELETE` | `/servers/{name}` | 削除(成功 204・不在/管理外 404) |
 | `POST` | `/servers/{name}/reinstall` | disk を base から作り直して再起動(不在/管理外 404) |
 
-`PUT` は VM を即時に定義・起動して返すが、ブートや DHCP は待たない。IP の確定は
-`GET /servers/{name}/status` を `ip` が出るまでポーリングして観測する。`filters` を
-指定した場合、nwfilter ルールは domain 定義に組み込む形で IP 確定を待たずに適用される。
-
-`DELETE` は VM 本体に加え、その VM 専用の nwfilter ルールも同時に削除する(孤児ルールは残さない)。
+`PUT`/`POST .../reinstall` の JSON body には、`startup_script` テンプレートに渡す
+秘密情報として `secrets` フィールドを追加で渡せる。詳細は
+[docs/startup-scripts.md](docs/startup-scripts.md) を参照。
 
 `stop`/`restart` の既定はゲスト OS への ACPI 経由の正常なシャットダウン/再起動の
 要求のみで、実際に状態が変わるまで待たない(`GET /servers/{name}/status` でポーリング
 して確認する)。JSON body に `{"force": true}` を渡すと即座に強制する。停止中の VM に
 `restart`(force 無し)を実行すると 409(`ServerNotRunning`)で拒否する。
-
-`reinstall` は overlay volume のみを作り直すため spec・metadata・IP アドレス
-(MAC アドレス)・nwfilter ルールは変わらない。別 base image への入れ替えは対象外。
-
-`PUT`/`POST .../reinstall` の JSON body には、`startup_script` テンプレートに渡す
-秘密情報として `secrets` フィールドを追加で渡せる。詳細は
-[docs/startup-scripts.md](docs/startup-scripts.md) を参照。
 
 ### 5. Prometheus エクスポーター
 
@@ -290,8 +277,7 @@ docker compose up -d
   VM ごとの CPU・メモリ・ネットワーク・ディスク I/O・起動状態を確認できる。
 
 Prometheus・Grafana とも `network_mode: host` で動作し、`127.0.0.1` にのみ bind する
-(exporter と同じく単一ホスト内で完結させ、外部には公開しない)。動作確認は主に
-ネイティブ Linux ホストを想定しており、WSL2 上では可能な範囲での確認に留まる。
+(exporter と同じく単一ホスト内で完結させ、外部には公開しない)。
 
 停止する場合は `docker compose down`(データは named volume に残る)。データも含めて
 完全に削除する場合は `docker compose down -v` を使う。
