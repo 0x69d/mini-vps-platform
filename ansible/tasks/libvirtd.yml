@@ -6,10 +6,6 @@
     enabled: true
   when: ansible_facts['os_family'] == 'Debian'
 
-# RedHat 系(Fedora/RHEL9 以降)はモジュラーデーモン(virtqemud 等)が既定。
-# モノリシック libvirtd を起動すると、default ネットワークの自動起動などで
-# モジュラーデーモンと bridge/dnsmasq を二重に掴み合う(EADDRINUSE)ため、
-# socket 単位で明確に無効化しておく。
 - name: モノリシック libvirtd 一式をマスクする(RedHat系)
   become: true
   ansible.builtin.systemd:
@@ -23,11 +19,6 @@
     - libvirtd-admin.socket
   when: ansible_facts['os_family'] == 'RedHat'
 
-# qemu/network/storage/nwfilter の4ドライバは本プロジェクトが実際に使う
-# (domain XML・NAT ネットワーク・pool/volume・パケットフィルタ)。ディストリの
-# 既定でソケットが有効化されている前提を置かず、明示的に有効化する
-# (Fedora は既定で有効なため冪等に no-op、AlmaLinux は既定で無効なため
-# net-define 等が virtnetworkd-sock 不在で失敗していた)。
 - name: モジュラーデーモンのソケットを有効化する(RedHat系)
   become: true
   ansible.builtin.systemd:
