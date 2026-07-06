@@ -7,14 +7,14 @@
 ## 暗黙の契約(前提条件)
 
 - **アーキテクチャ**: x86_64 + KVM(`<type arch='x86_64' machine='q35'>hvm</type>`)。
-- **CPU モデル**: `<cpu mode='host-model'/>` でホスト CPU をそのままゲストへ公開する。
+- **CPU モデル**: `<cpu mode='host-model'/>` でホスト CPU に近い CPU モデルをゲストへ公開する。
   RHEL 10 系(Rocky 10・AlmaLinux 10 等)は x86-64-v3(AVX2 世代)を要求するため、
   ホスト CPU が v3 未満だと起動できない。
 - **ディスク/NIC**: virtio(`bus='virtio'`)前提。virtio ドライバを内蔵した cloud
   image であること。
 - **ブート**: UEFI(`<os firmware='efi'>` による libvirt の firmware 自動選択、
   `<loader secure='no'/>` で secure-boot 非対応 firmware を選択)。`teardown()` は
-  per-VM の nvram ファイルも `VIR_DOMAIN_UNDEFINE_NVRAM` フラグで併せて削除する。
+  VM の nvram ファイルも `VIR_DOMAIN_UNDEFINE_NVRAM` フラグで併せて削除する。
 - **cloud-init**: NoCloud データソース。`cloud-localds` が `cidata` ラベルの ISO を
   生成し、ゲスト側の cloud-init がそれを読む前提(image 自体に NoCloud 対応の
   cloud-init が同梱されている必要がある)。
