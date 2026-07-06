@@ -1,9 +1,36 @@
-- name: libvirtd を起動・自動起動を有効にする
+- name: libvirtd を起動・自動起動を有効にする(Debian系)
   become: true
   ansible.builtin.service:
     name: libvirtd
     state: started
     enabled: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: モノリシック libvirtd 一式をマスクする(RedHat系)
+  become: true
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    masked: true
+  loop:
+    - libvirtd.service
+    - libvirtd.socket
+    - libvirtd-ro.socket
+    - libvirtd-admin.socket
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: モジュラーデーモンのソケットを有効化する(RedHat系)
+  become: true
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - virtqemud.socket
+    - virtnetworkd.socket
+    - virtstoraged.socket
+    - virtnwfilterd.socket
+  when: ansible_facts['os_family'] == 'RedHat'
 
 - name: 実行ユーザーを libvirt グループに追加する
   become: true

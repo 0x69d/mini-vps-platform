@@ -1,6 +1,7 @@
 # セグメント1件分の NAT ネットワークを冪等に用意する。
 # playbook 側の include_tasks + loop(loop_var: segment)から呼ばれる前提。
 - name: "ネットワークの状態を確認する: {{ segment.name }}"
+  become: true
   ansible.builtin.command: "virsh net-info {{ segment.name }}"
   register: minivps_segment_net_info
   changed_when: false
@@ -33,6 +34,7 @@
   when: minivps_segment_net_info.rc != 0
 
 - name: "ネットワークの状態を再確認する: {{ segment.name }}"
+  become: true
   ansible.builtin.command: "virsh net-info {{ segment.name }}"
   register: minivps_segment_net_info2
   changed_when: false

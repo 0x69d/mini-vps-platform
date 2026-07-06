@@ -126,6 +126,11 @@ secrets の渡し方・トラブルシューティングは [docs/startup-script
 - [uv](https://docs.astral.sh/uv/)
 - ビルド依存（libvirt-python は PyPI で sdist のみ提供のため、`uv add` 時にソースビルドが走る）: libvirt の開発ヘッダ + Python 開発ヘッダ（`Python.h`）+ pkg-config + C コンパイラ
 
+### 動作確認済みホスト OS
+
+- Ubuntu 26.04 LTS
+- Fedora Linux 44
+
 ## セットアップ
 
 ### 1. ホスト側の事前設定(Ansible)
@@ -136,8 +141,8 @@ secrets の渡し方・トラブルシューティングは [docs/startup-script
 SSH 鍵まで、Ansible playbook で一括セットアップする。
 
 ```bash
-uv sync --group ops
-uv run ansible-playbook -i ansible/inventory.ini ansible/playbook.yml --ask-become-pass
+uv sync --only-group ops
+uv run --only-group ops ansible-playbook -i ansible/inventory.ini ansible/playbook.yml --ask-become-pass
 ```
 
 > **警告**: `sudo ansible-playbook ...` のように実行コマンド自体を sudo しないこと。
