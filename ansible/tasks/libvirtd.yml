@@ -1,9 +1,35 @@
-- name: libvirtd を起動・自動起動を有効にする
+- name: libvirtd を起動・自動起動を有効にする(Debian系)
   become: true
   ansible.builtin.service:
     name: libvirtd
     state: started
     enabled: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+# RedHat 系(Fedora/RHEL9 以降)はモジュラーデーモン(virtqemud 等)が既定。
+# モノリシック libvirtd を起動すると、default ネットワークの自動起動などで
+# モジュラーデーモンと bridge/dnsmasq を二重に掴み合う(EADDRINUSE)ため、
+# socket 単位で明確に無効化しておく。
+- name: モノリシック libvirtd 一式をマスクする(RedHat系)
+  become: true
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    masked: true
+  loop:
+    - libvirtd.service
+    - libvirtd.socket
+    - libvirtd-ro.socket
+    - libvirtd-admin.socket
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: virtqemud を起動・自動起動を有効にする(RedHat系)
+  become: true
+  ansible.builtin.service:
+    name: virtqemud
+    state: started
+    enabled: true
+  when: ansible_facts['os_family'] == 'RedHat'
 
 - name: 実行ユーザーを libvirt グループに追加する
   become: true
