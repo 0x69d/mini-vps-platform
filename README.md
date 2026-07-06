@@ -136,8 +136,8 @@ secrets の渡し方・トラブルシューティングは [docs/startup-script
 SSH 鍵まで、Ansible playbook で一括セットアップする。
 
 ```bash
-uv sync --group ops
-uv run ansible-playbook -i ansible/inventory.ini ansible/playbook.yml --ask-become-pass
+uv sync --only-group ops
+uv run --only-group ops ansible-playbook -i ansible/inventory.ini ansible/playbook.yml --ask-become-pass
 ```
 
 > **警告**: `sudo ansible-playbook ...` のように実行コマンド自体を sudo しないこと。
