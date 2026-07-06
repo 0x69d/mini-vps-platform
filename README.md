@@ -126,6 +126,11 @@ secrets の渡し方・トラブルシューティングは [docs/startup-script
 - [uv](https://docs.astral.sh/uv/)
 - ビルド依存（libvirt-python は PyPI で sdist のみ提供のため、`uv add` 時にソースビルドが走る）: libvirt の開発ヘッダ + Python 開発ヘッダ（`Python.h`）+ pkg-config + C コンパイラ
 
+### 動作確認済みホスト OS
+
+- Ubuntu 26.04 LTS
+- Fedora Linux 44
+
 ## セットアップ
 
 ### 1. ホスト側の事前設定(Ansible)

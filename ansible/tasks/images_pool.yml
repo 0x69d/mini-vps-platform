@@ -1,4 +1,5 @@
 - name: images プールの定義有無を確認する
+  become: true
   ansible.builtin.command: virsh pool-info images
   register: minivps_images_pool_info
   changed_when: false
@@ -38,6 +39,7 @@
   failed_when: false
 
 - name: images プールの状態を再確認する
+  become: true
   ansible.builtin.command: virsh pool-info images
   register: minivps_images_pool_info2
   changed_when: false
