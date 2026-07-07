@@ -4,7 +4,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 import mini_vps.api as api_module
-from mini_vps.manager import ServerConflict, ServerNotFound, ServerNotRunning
+from mini_vps.manager import (
+    ServerConflict,
+    ServerNotFound,
+    ServerNotRunning,
+    ServerRunning,
+)
 from mini_vps.startup_scripts import StartupScriptError
 
 
@@ -81,6 +86,16 @@ def test_put_server_returns_200_when_idempotent(client):
 def test_put_server_returns_409_on_conflict(client):
     test_client, mock_manager = client
     mock_manager.create.side_effect = ServerConflict("web-1")
+
+    response = test_client.put("/servers/web-1", json=PUT_BODY)
+
+    assert response.status_code == 409
+
+
+def test_put_server_returns_409_when_running(client):
+    """memory/vcpus/filters の差分収束は稼働中の VM には適用できない。"""
+    test_client, mock_manager = client
+    mock_manager.create.side_effect = ServerRunning("web-1")
 
     response = test_client.put("/servers/web-1", json=PUT_BODY)
 

@@ -3,6 +3,7 @@
 import os
 import subprocess
 import tempfile
+import xml.etree.ElementTree as ET
 
 import libvirt
 import yaml
@@ -155,3 +156,57 @@ def build_domain_xml(spec, overlay_path, seed_path, filter_name=None) -> str:
         filterref=filterref,
     )
     return xml
+
+
+def resize_domain_xml(xml_text: str, memory_kib: int, vcpus: int) -> str:
+    """Domain XML の <memory>/<currentMemory>/<vcpu> 要素のみを書き換えて返す。
+
+    dom.XMLDesc(VIR_DOMAIN_XML_INACTIVE) が返す完全な定義XML(MAC・UUID含む)を
+    そのまま受け取り、それ以外の要素・属性は一切変更しない外部依存ゼロの純粋関数。
+    build_domain_xml と異なりテンプレートからの再構築ではなく既存定義への最小差分編集
+    であり、MAC/UUID の意図しない再生成(IP変化・UUID衝突)を避けるための手段。
+    <currentMemory> が既存になければ <memory> の直後に同じ unit で新規追加する
+    (起動時メモリが旧値のまま残らないようにするため)。
+    """
+    root = ET.fromstring(xml_text)
+
+    memory_el = root.find("memory")
+    memory_el.text = str(memory_kib)
+
+    current_memory_el = root.find("currentMemory")
+    if current_memory_el is None:
+        current_memory_el = ET.Element(
+            "currentMemory", unit=memory_el.get("unit", "KiB")
+        )
+        root.insert(list(root).index(memory_el) + 1, current_memory_el)
+    current_memory_el.text = str(memory_kib)
+
+    root.find("vcpu").text = str(vcpus)
+
+    return ET.tostring(root, encoding="unicode")
+
+
+def set_domain_filterref_xml(xml_text: str, filter_name: str | None) -> str:
+    """Domain XML の <devices><interface> 配下の <filterref> のみを書き換えて返す。
+
+    resize_domain_xml と同じ設計思想(dom.XMLDesc(VIR_DOMAIN_XML_INACTIVE) が返す
+    完全な定義XMLをそのまま受け取り、それ以外の要素・属性は一切変更しない外部依存
+    ゼロの純粋関数)。filter_name が None なら既存の <filterref> を除去し(無ければ
+    何もしない)、文字列なら <filterref filter='{filter_name}'/> を追加する
+    (既存にあれば filter 属性だけ書き換える)。「フィルタなし→あり」
+    「あり→なし」「あり→あり(ルール内容のみ変更、filter 名は不変)」のいずれの
+    遷移でも同じ呼び出し方でこの1関数を使える。
+    """
+    root = ET.fromstring(xml_text)
+    interface_el = root.find("devices/interface")
+    filterref_el = interface_el.find("filterref")
+
+    if filter_name is None:
+        if filterref_el is not None:
+            interface_el.remove(filterref_el)
+    else:
+        if filterref_el is None:
+            filterref_el = ET.SubElement(interface_el, "filterref")
+        filterref_el.set("filter", filter_name)
+
+    return ET.tostring(root, encoding="unicode")
