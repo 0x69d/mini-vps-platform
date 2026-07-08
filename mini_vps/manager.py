@@ -24,6 +24,8 @@ from .spec import read_pubkey
 
 # create() が停止中の既存 VM に対して収束(defineXML の最小差分編集)を許す
 # フィールド。それ以外のフィールドの差分は ServerConflict で拒否する。
+# network はインターフェース XML の書き換えだけなら技術的には可能だが、
+# 実運用への影響が大きいためスコープ外とし、明示的に別操作として扱う。
 # 新しい可変フィールドを追加する場合はここに追記する。
 _MUTABLE_FIELDS = frozenset({"memory", "vcpus", "filters"})
 
@@ -248,6 +250,9 @@ class ServerManager:
                 raise ServerRunning(name)
 
             dom = self._converge(existing, old_spec, spec, diff_keys)
+            # _write_spec が失敗しても domain 実体側はロールバックしない。_converge の
+            # 各操作(resize/filterref 設定/nwfilter 定義・削除)は全遷移パターンで冪等
+            # なため、同じ spec で create() を再実行すれば自己修復する。
             _write_spec(dom, spec)
             return self.get(name), False
 
@@ -260,7 +265,9 @@ class ServerManager:
         参照されている間)は undefine できないため(teardown() 参照)、フィルタ解除時は
         defineXML で filterref を外した後に undefine する。フィルタ新設時は逆に
         nwfilterDefineXML で先に定義してから defineXML で filterref を付ける
-        (provision() と同じ順序)。
+        (provision() と同じ順序)。undefine 前には teardown() と同じく存在確認する
+        (_write_spec 失敗後に create() が再実行された場合、前回既に undefine 済みの
+        filter に対して呼ばれる可能性があるため)。
 
         Returns:
             defineXML 後の domain(filters/memory/vcpus のいずれの差分も無ければ
@@ -283,7 +290,9 @@ class ServerManager:
 
         dom = self.conn.defineXML(xml)
 
-        if should_undefine:
+        if should_undefine and filter_name in {
+            f.name() for f in self.conn.listAllNWFilters()
+        }:
             self.conn.nwfilterLookupByName(filter_name).undefine()
 
         return dom

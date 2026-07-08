@@ -431,6 +431,9 @@ def test_create_converges_filters_list_to_none_detaches_before_undefining(
     monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
     set_filterref_mock = MagicMock(return_value="<domain unfiltered/>")
     monkeypatch.setattr("mini_vps.manager.set_domain_filterref_xml", set_filterref_mock)
+    nwfilter = MagicMock()
+    nwfilter.name.return_value = "minivps-web-1"
+    conn.listAllNWFilters.return_value = [nwfilter]
 
     mgr.create(new_spec)
 
@@ -443,6 +446,37 @@ def test_create_converges_filters_list_to_none_detaches_before_undefining(
     assert call_names.index("defineXML") < call_names.index(
         "nwfilterLookupByName().undefine"
     )
+
+
+def test_create_converge_skips_undefine_when_filter_already_absent(monkeypatch):
+    """_write_spec 失敗後の create() 再実行を模した回帰テスト。
+
+    1回目の呼び出しで defineXML + undefine が成功したが _write_spec が失敗すると、
+    old_spec は依然 filters あり・new_spec は filters=None のままなので、2回目の
+    create() でも同じ収束が再度走る。しかし nwfilter は既に undefine 済みのため、
+    teardown() と同じ存在確認ガードが無いと nwfilterLookupByName().undefine() が
+    実体の無い filter に対して呼ばれてしまう。
+    """
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    dom.XMLDesc.return_value = "<domain filtered/>"
+    old_spec = _full_spec(filters=[{"port": 22, "protocol": "tcp"}])
+    new_spec = _full_spec(filters=None)
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    monkeypatch.setattr(
+        "mini_vps.manager.set_domain_filterref_xml",
+        MagicMock(return_value="<domain unfiltered/>"),
+    )
+    conn.listAllNWFilters.return_value = []  # 既に undefine 済み
+
+    mgr.create(new_spec)
+
+    conn.nwfilterLookupByName.assert_not_called()
 
 
 def test_create_converges_filters_list_to_list_redefines_without_undefining(
