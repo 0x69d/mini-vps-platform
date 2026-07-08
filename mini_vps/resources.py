@@ -189,13 +189,12 @@ def resize_domain_xml(xml_text: str, memory_kib: int, vcpus: int) -> str:
 def set_domain_filterref_xml(xml_text: str, filter_name: str | None) -> str:
     """Domain XML の <devices><interface> 配下の <filterref> のみを書き換えて返す。
 
-    resize_domain_xml と同じ設計思想(dom.XMLDesc(VIR_DOMAIN_XML_INACTIVE) が返す
-    完全な定義XMLをそのまま受け取り、それ以外の要素・属性は一切変更しない外部依存
-    ゼロの純粋関数)。filter_name が None なら既存の <filterref> を除去し(無ければ
-    何もしない)、文字列なら <filterref filter='{filter_name}'/> を追加する
-    (既存にあれば filter 属性だけ書き換える)。「フィルタなし→あり」
-    「あり→なし」「あり→あり(ルール内容のみ変更、filter 名は不変)」のいずれの
-    遷移でも同じ呼び出し方でこの1関数を使える。
+    resize_domain_xml と同様の純粋関数。
+    filter_name が None なら既存の <filterref> を除去し(無ければ何もしない)、
+    文字列なら <filterref filter='{filter_name}'/> を追加する(既存にあれば
+    filter 属性だけ書き換える)。「フィルタなし→あり」「あり→なし」
+    「あり→あり(ルール内容のみ変更、filter 名は不変)」のいずれの遷移でも
+    同じ呼び出し方でこの1関数を使える。
     """
     root = ET.fromstring(xml_text)
     interface_el = root.find("devices/interface")

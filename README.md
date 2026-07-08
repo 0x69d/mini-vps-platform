@@ -249,15 +249,13 @@ OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
 秘密情報として `secrets` フィールドを追加で渡せる。詳細は
 [docs/startup-scripts.md](docs/startup-scripts.md) を参照。
 
-`stop`/`restart` の既定はゲスト OS への ACPI 経由の正常なシャットダウン/再起動の
-要求のみで、実際に状態が変わるまで待たない(`GET /servers/{name}/status` でポーリング
-して確認する)。JSON body に `{"force": true}` を渡すと即座に強制する。停止中の VM に
-`restart`(force 無し)を実行すると 409(`ServerNotRunning`)で拒否する。
+`stop`/`restart` の既定動作は CLI の `stop`/`restart`(上記参照)と同じ。強制は
+JSON body に `{"force": true}` を渡し、状態変化は `GET /servers/{name}/status`
+でポーリングして確認する。停止中の VM への `restart`(force 無し)は CLI 同様
+拒否され、API では 409(`ServerNotRunning`)で返る。
 
-`PUT` を既存 VM に対して再実行すると、`memory`/`vcpus`/`filters` の差分のみ収束
-させる(それ以外のフィールドの差分は spec 相違として 409/`ServerConflict` で拒否
-する)。収束はドメイン停止中の VM のみ許可し、稼働中に実行すると 409
-(`ServerRunning`)で拒否する。
+収束の挙動は CLI の `create`(上記参照)と同じ。API では `ServerConflict`・
+`ServerRunning` のどちらも 409 で返る。
 
 ### 5. Prometheus エクスポーター
 
