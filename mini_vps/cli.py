@@ -22,6 +22,7 @@ from .manager import (
     ServerManager,
     ServerNotFound,
     ServerNotRunning,
+    ServerRunning,
     register_quiet_error_handler,
 )
 from .spec import load_spec
@@ -122,6 +123,9 @@ def _run_command(func):
         except ServerNotRunning as e:
             print(f"error: server not running: {e}", file=sys.stderr)
             raise typer.Exit(code=4) from None
+        except ServerRunning as e:
+            print(f"error: server running: {e}", file=sys.stderr)
+            raise typer.Exit(code=5) from None
         except (ValidationError, yaml.YAMLError, OSError, StartupScriptError) as e:
             print(f"error: {e}", file=sys.stderr)
             raise typer.Exit(code=1) from None
@@ -139,13 +143,21 @@ def _command(name: str, *, help: str):
     return decorator
 
 
-@_command("create", help="VM スペックの YAML から VM を宣言的に作成する")
+@_command(
+    "create",
+    help="VM スペックの YAML から VM を宣言的に作成・収束する",
+)
 def _cmd_create(
     ctx: typer.Context,
     spec_file: Annotated[str, typer.Argument(help="VM スペックの YAML ファイルパス")],
     startup_param: _StartupParamOption = [],
 ) -> dict:
-    """VM スペックの YAML ファイルから VM を宣言的・冪等に作成する。"""
+    """VM スペックの YAML ファイルから VM を宣言的に作成/収束する。
+
+    既存 VM に対して再実行した場合、memory/vcpus/filters の差分のみドメイン停止中に
+    限り収束させる(起動中なら ServerRunning)。それ以外のフィールドの差分は
+    ServerConflict で拒否する(ServerManager.create 参照)。
+    """
     with open(spec_file, encoding="utf-8") as f:
         spec = load_spec(f.read())
     secrets = _parse_startup_params(startup_param)
@@ -227,7 +239,9 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
 
     Returns:
         プロセス終了コード(成功 0、ServerNotFound 2、ServerConflict 3、
-        ServerNotRunning 4、spec ファイル関連のエラー 1、Typer の使用法エラー 2)。
+        ServerNotRunning 4、ServerRunning 5(create が可変フィールド差分を
+        起動中の VM に適用しようとした場合を含む)、spec ファイル関連のエラー 1、
+        Typer の使用法エラー 2)。
     """
     factory = manager_factory or _open_manager
     try:

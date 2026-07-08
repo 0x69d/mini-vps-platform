@@ -9,11 +9,11 @@ from mini_vps.manager import (
     ServerManager,
     ServerNotFound,
     ServerNotRunning,
+    ServerRunning,
     _find_domain,
     _is_managed,
     _lookup,
     _read_spec,
-    _spec_matches,
     _status_of,
     _write_spec,
     register_quiet_error_handler,
@@ -120,29 +120,6 @@ def test_find_domain_reraises_other_errors():
         _find_domain(conn, "web-1")
 
 
-# --- _spec_matches ---
-
-
-def test_spec_matches_true_when_equal(monkeypatch):
-    spec = {"name": "web-1"}
-    monkeypatch.setattr("mini_vps.manager._read_spec", lambda dom: spec)
-
-    assert _spec_matches(MagicMock(), spec) is True
-
-
-def test_spec_matches_false_when_different(monkeypatch):
-    monkeypatch.setattr("mini_vps.manager._read_spec", lambda dom: {"name": "other"})
-
-    assert _spec_matches(MagicMock(), {"name": "web-1"}) is False
-
-
-def test_spec_matches_false_when_unmanaged():
-    dom = MagicMock()
-    dom.metadata.side_effect = make_libvirt_error(libvirt.VIR_ERR_NO_DOMAIN_METADATA)
-
-    assert _spec_matches(dom, {"name": "web-1"}) is False
-
-
 # --- _status_of ---
 
 
@@ -170,16 +147,30 @@ def test_status_of_non_running_has_no_ip(monkeypatch):
 # --- ServerManager.create ---
 
 
+def _full_spec(**overrides):
+    spec = {
+        "name": "web-1",
+        "memory": 1024,
+        "vcpus": 2,
+        "base_image": "ubuntu-24.04.img",
+        "disk": 10,
+    }
+    spec.update(overrides)
+    return spec
+
+
 def test_create_is_idempotent_when_spec_matches(monkeypatch):
     conn = MagicMock()
     mgr = ServerManager(conn)
+    spec = {"name": "web-1"}
     monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: MagicMock())
-    monkeypatch.setattr("mini_vps.manager._spec_matches", lambda dom, spec: True)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda dom: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda dom: spec)
     provision_mock = MagicMock()
     monkeypatch.setattr("mini_vps.manager.provision", provision_mock)
-    mgr.get = MagicMock(return_value={"spec": {"name": "web-1"}, "status": {}})
+    mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
 
-    result, created = mgr.create({"name": "web-1"})
+    result, created = mgr.create(spec)
 
     assert created is False
     provision_mock.assert_not_called()
@@ -187,13 +178,25 @@ def test_create_is_idempotent_when_spec_matches(monkeypatch):
 
 
 def test_create_raises_conflict_when_spec_differs(monkeypatch):
+    """不変フィールド(disk)の差分は収束対象外のため ServerConflict になる。"""
     conn = MagicMock()
     mgr = ServerManager(conn)
     monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: MagicMock())
-    monkeypatch.setattr("mini_vps.manager._spec_matches", lambda dom, spec: False)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda dom: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda dom: _full_spec())
 
     with pytest.raises(ServerConflict):
-        mgr.create({"name": "web-1"})
+        mgr.create(_full_spec(disk=20))
+
+
+def test_create_raises_conflict_when_existing_is_unmanaged(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: MagicMock())
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda dom: False)
+
+    with pytest.raises(ServerConflict):
+        mgr.create(_full_spec())
 
 
 def test_create_provisions_new_when_absent(monkeypatch):
@@ -263,6 +266,277 @@ def test_create_never_writes_secrets_into_spec_metadata(monkeypatch):
     # _write_spec に渡る spec は secrets を一切含まない(そのままの spec dict)
     write_spec_mock.assert_called_once_with(dom, spec)
     assert "secrets" not in write_spec_mock.call_args[0][1]
+
+
+# --- ServerManager.create (可変フィールドの収束) ---
+
+
+def test_create_raises_server_running_when_mutable_diff_and_active(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = True
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: _full_spec())
+
+    with pytest.raises(ServerRunning):
+        mgr.create(_full_spec(memory=2048))
+
+    dom.XMLDesc.assert_not_called()
+    conn.defineXML.assert_not_called()
+
+
+def test_create_converges_memory_only_when_stopped(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    dom.XMLDesc.return_value = "<domain/>"
+    old_spec = _full_spec()
+    new_spec = _full_spec(memory=2048)
+    new_dom = MagicMock()
+    conn.defineXML.return_value = new_dom
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
+    write_spec_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager._write_spec", write_spec_mock)
+    resize_xml_mock = MagicMock(return_value="<domain resized/>")
+    monkeypatch.setattr("mini_vps.manager.resize_domain_xml", resize_xml_mock)
+    mgr.get = MagicMock(return_value={"spec": new_spec, "status": {}})
+
+    result, created = mgr.create(new_spec)
+
+    assert created is False
+    dom.XMLDesc.assert_called_once_with(libvirt.VIR_DOMAIN_XML_INACTIVE)
+    resize_xml_mock.assert_called_once_with("<domain/>", 2048 * 1024, 2)
+    conn.defineXML.assert_called_once_with("<domain resized/>")
+    write_spec_mock.assert_called_once_with(new_dom, new_spec)
+    assert result == mgr.get.return_value
+
+
+def test_create_converges_vcpus_only_when_stopped(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    dom.XMLDesc.return_value = "<domain/>"
+    old_spec = _full_spec()
+    new_spec = _full_spec(vcpus=4)
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    resize_xml_mock = MagicMock(return_value="<domain resized/>")
+    monkeypatch.setattr("mini_vps.manager.resize_domain_xml", resize_xml_mock)
+
+    mgr.create(new_spec)
+
+    resize_xml_mock.assert_called_once_with("<domain/>", 1024 * 1024, 4)
+
+
+def test_create_converges_memory_and_vcpus_together(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    dom.XMLDesc.return_value = "<domain/>"
+    old_spec = _full_spec()
+    new_spec = _full_spec(memory=4096, vcpus=8)
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    resize_xml_mock = MagicMock(return_value="<domain resized/>")
+    monkeypatch.setattr("mini_vps.manager.resize_domain_xml", resize_xml_mock)
+
+    mgr.create(new_spec)
+
+    resize_xml_mock.assert_called_once_with("<domain/>", 4096 * 1024, 8)
+
+
+def test_create_converges_filters_none_to_list_defines_and_attaches_filter(
+    monkeypatch,
+):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    dom.XMLDesc.return_value = "<domain/>"
+    old_spec = _full_spec(filters=None)
+    new_spec = _full_spec(filters=[{"port": 22, "protocol": "tcp"}])
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    nwfilter_xml_mock = MagicMock(return_value="<filter/>")
+    monkeypatch.setattr("mini_vps.manager.build_nwfilter_xml", nwfilter_xml_mock)
+    set_filterref_mock = MagicMock(return_value="<domain filtered/>")
+    monkeypatch.setattr("mini_vps.manager.set_domain_filterref_xml", set_filterref_mock)
+
+    mgr.create(new_spec)
+
+    nwfilter_xml_mock.assert_called_once_with(new_spec)
+    conn.nwfilterDefineXML.assert_called_once_with("<filter/>")
+    set_filterref_mock.assert_called_once_with("<domain/>", "minivps-web-1")
+    conn.defineXML.assert_called_once_with("<domain filtered/>")
+    conn.nwfilterLookupByName.assert_not_called()
+
+
+def test_create_converges_filters_none_to_empty_list_defines_deny_all_filter(
+    monkeypatch,
+):
+    """filters=[] は「フィルタ無し」ではなく「全 inbound 拒否」を意味する。
+
+    is not None ではなく truthy 判定(if filters:)への退行があると、この
+    ケースで nwfilterDefineXML/filterref 付与が呼ばれなくなり検知できる。
+    """
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    dom.XMLDesc.return_value = "<domain/>"
+    old_spec = _full_spec(filters=None)
+    new_spec = _full_spec(filters=[])
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    nwfilter_xml_mock = MagicMock(return_value="<filter/>")
+    monkeypatch.setattr("mini_vps.manager.build_nwfilter_xml", nwfilter_xml_mock)
+    set_filterref_mock = MagicMock(return_value="<domain filtered/>")
+    monkeypatch.setattr("mini_vps.manager.set_domain_filterref_xml", set_filterref_mock)
+
+    mgr.create(new_spec)
+
+    nwfilter_xml_mock.assert_called_once_with(new_spec)
+    conn.nwfilterDefineXML.assert_called_once_with("<filter/>")
+    set_filterref_mock.assert_called_once_with("<domain/>", "minivps-web-1")
+
+
+def test_create_converges_filters_list_to_none_detaches_before_undefining(
+    monkeypatch,
+):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    dom.XMLDesc.return_value = "<domain filtered/>"
+    old_spec = _full_spec(filters=[{"port": 22, "protocol": "tcp"}])
+    new_spec = _full_spec(filters=None)
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    set_filterref_mock = MagicMock(return_value="<domain unfiltered/>")
+    monkeypatch.setattr("mini_vps.manager.set_domain_filterref_xml", set_filterref_mock)
+    nwfilter = MagicMock()
+    nwfilter.name.return_value = "minivps-web-1"
+    conn.listAllNWFilters.return_value = [nwfilter]
+
+    mgr.create(new_spec)
+
+    set_filterref_mock.assert_called_once_with("<domain filtered/>", None)
+    conn.nwfilterDefineXML.assert_not_called()
+    conn.nwfilterLookupByName.assert_called_once_with("minivps-web-1")
+    # nwfilter は filterref から参照されている間 undefine できないため、
+    # defineXML(filterref 除去)が undefine より先に呼ばれている必要がある。
+    call_names = [c[0] for c in conn.mock_calls]
+    assert call_names.index("defineXML") < call_names.index(
+        "nwfilterLookupByName().undefine"
+    )
+
+
+def test_create_converge_skips_undefine_when_filter_already_absent(monkeypatch):
+    """_write_spec 失敗後の create() 再実行を模した回帰テスト。
+
+    1回目の呼び出しで defineXML + undefine が成功したが _write_spec が失敗すると、
+    old_spec は依然 filters あり・new_spec は filters=None のままなので、2回目の
+    create() でも同じ収束が再度走る。しかし nwfilter は既に undefine 済みのため、
+    teardown() と同じ存在確認ガードが無いと nwfilterLookupByName().undefine() が
+    実体の無い filter に対して呼ばれてしまう。
+    """
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    dom.XMLDesc.return_value = "<domain filtered/>"
+    old_spec = _full_spec(filters=[{"port": 22, "protocol": "tcp"}])
+    new_spec = _full_spec(filters=None)
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    monkeypatch.setattr(
+        "mini_vps.manager.set_domain_filterref_xml",
+        MagicMock(return_value="<domain unfiltered/>"),
+    )
+    conn.listAllNWFilters.return_value = []  # 既に undefine 済み
+
+    mgr.create(new_spec)
+
+    conn.nwfilterLookupByName.assert_not_called()
+
+
+def test_create_converges_filters_list_to_list_redefines_without_undefining(
+    monkeypatch,
+):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    dom.XMLDesc.return_value = "<domain filtered/>"
+    old_spec = _full_spec(filters=[{"port": 22, "protocol": "tcp"}])
+    new_spec = _full_spec(filters=[{"port": 80, "protocol": "tcp"}])
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    nwfilter_xml_mock = MagicMock(return_value="<filter/>")
+    monkeypatch.setattr("mini_vps.manager.build_nwfilter_xml", nwfilter_xml_mock)
+    monkeypatch.setattr(
+        "mini_vps.manager.set_domain_filterref_xml",
+        MagicMock(return_value="<domain refiltered/>"),
+    )
+
+    mgr.create(new_spec)
+
+    nwfilter_xml_mock.assert_called_once_with(new_spec)
+    conn.nwfilterDefineXML.assert_called_once_with("<filter/>")
+    conn.nwfilterLookupByName.assert_not_called()
+
+
+def test_create_converges_filters_and_memory_together_in_single_definexml(
+    monkeypatch,
+):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    dom.XMLDesc.return_value = "<domain/>"
+    old_spec = _full_spec(filters=None)
+    new_spec = _full_spec(memory=2048, filters=[{"port": 22, "protocol": "tcp"}])
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    monkeypatch.setattr(
+        "mini_vps.manager.build_nwfilter_xml", MagicMock(return_value="<filter/>")
+    )
+    monkeypatch.setattr(
+        "mini_vps.manager.resize_domain_xml",
+        MagicMock(return_value="<domain resized/>"),
+    )
+    monkeypatch.setattr(
+        "mini_vps.manager.set_domain_filterref_xml",
+        MagicMock(return_value="<domain resized filtered/>"),
+    )
+
+    mgr.create(new_spec)
+
+    dom.XMLDesc.assert_called_once_with(libvirt.VIR_DOMAIN_XML_INACTIVE)
+    conn.defineXML.assert_called_once_with("<domain resized filtered/>")
 
 
 # --- ServerManager.list ---

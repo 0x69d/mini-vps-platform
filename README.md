@@ -18,14 +18,16 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 - `Server` リソース: YAML / JSON 定義から libvirt domain を生成・起動・停止・削除する。
 - NAT ネットワーク: libvirt の仮想ブリッジ経由でゲストを外向き通信させる。
 - セグメント分離: 複数の独立 NAT ネットワークで VM を隔離する。
-- パケットフィルタ: `filters` で宣言した inbound ポートのみ許可する。
+- パケットフィルタ: `filters` で宣言した inbound ポートのみ許可する
+  (作成後に `vm-spec.yaml` を編集して再度 `create`/`PUT` することで変更できる)。
 - 監視: Prometheus + Grafana によってメトリクスを可視化する。
 
 ### 含まないもの
 
 - 複数物理ホストへのスケジューリング。
 - マルチテナンシー、課金、認証などの大規模運用機構。
-- パケットフィルタの IPv6・egress・動的なルール更新 API（inbound・IPv4・作成時適用のみ）。
+- パケットフィルタの IPv6・egress・稼働中 VM へのライブ反映(ルール変更は停止中の VM に
+  限り inbound・IPv4 のみ対応、反映は次回起動時から)。
 - アラート通知(Alertmanager 等)。
 
 ## アーキテクチャ
@@ -196,7 +198,7 @@ uv run mini-vps delete web-1
 
 | サブコマンド | 説明 |
 |---|---|
-| `create <file>` | spec YAML から VM を宣言的・冪等に作成する |
+| `create <file>` | spec YAML から VM を宣言的に作成・収束する |
 | `get <name>` | spec と状態を表示する(不在なら終了コード 2) |
 | `list` | 管理対象の VM 名を1行ずつ表示する |
 | `status <name>` | 状態(state・ip)を表示する(不在なら終了コード 2) |
@@ -215,6 +217,12 @@ uv run mini-vps delete web-1
 停止中の VM に `restart`(force 無し)を実行すると終了コード 4(`ServerNotRunning`)
 で拒否する。
 
+`create` を既存 VM に対して再実行すると、`memory`/`vcpus`/`filters` の差分のみ
+収束させる(それ以外のフィールドの差分は spec 相違として終了コード 3
+(`ServerConflict`)で拒否する)。収束はドメイン停止中の VM のみ許可し、
+稼働中に実行すると終了コード 5(`ServerRunning`)で拒否する(先に `stop` してから
+再実行する)。
+
 ### 4. Web API(JSON)
 
 他サービス向けの入口。宣言的 YAML は CLI 向け、API は JSON で分離する。
@@ -230,7 +238,7 @@ OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
 | `GET` | `/servers` | 管理対象の VM 名一覧 |
 | `GET` | `/servers/{name}` | spec と状態(不在なら 404) |
 | `GET` | `/servers/{name}/status` | 状態 state・ip(不在なら 404) |
-| `PUT` | `/servers/{name}` | 宣言的・冪等な作成/収束(新規 201・冪等 200・spec 相違 409) |
+| `PUT` | `/servers/{name}` | 宣言的な作成/収束(新規 201・完全一致の no-op/収束 200・spec 相違 409) |
 | `POST` | `/servers/{name}/start` | VM を起動する(起動中なら冪等に no-op、不在/管理外 404) |
 | `POST` | `/servers/{name}/stop` | VM を停止する(停止中なら冪等に no-op、不在/管理外 404) |
 | `POST` | `/servers/{name}/restart` | disk を保持したまま VM を再起動する(不在/管理外 404) |
@@ -241,10 +249,13 @@ OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
 秘密情報として `secrets` フィールドを追加で渡せる。詳細は
 [docs/startup-scripts.md](docs/startup-scripts.md) を参照。
 
-`stop`/`restart` の既定はゲスト OS への ACPI 経由の正常なシャットダウン/再起動の
-要求のみで、実際に状態が変わるまで待たない(`GET /servers/{name}/status` でポーリング
-して確認する)。JSON body に `{"force": true}` を渡すと即座に強制する。停止中の VM に
-`restart`(force 無し)を実行すると 409(`ServerNotRunning`)で拒否する。
+`stop`/`restart` の既定動作は CLI の `stop`/`restart`(上記参照)と同じ。強制は
+JSON body に `{"force": true}` を渡し、状態変化は `GET /servers/{name}/status`
+でポーリングして確認する。停止中の VM への `restart`(force 無し)は CLI 同様
+拒否され、API では 409(`ServerNotRunning`)で返る。
+
+収束の挙動は CLI の `create`(上記参照)と同じ。API では `ServerConflict`・
+`ServerRunning` のどちらも 409 で返る。
 
 ### 5. Prometheus エクスポーター
 

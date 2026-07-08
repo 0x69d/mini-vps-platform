@@ -12,8 +12,22 @@ import yaml
 
 from .config import METADATA_KEY, METADATA_NS
 from .lifecycle import _lease_ipv4, ensure_network_active, provision, teardown
-from .resources import build_seed_iso, create_overlay_volume
+from .resources import (
+    _filter_name,
+    build_nwfilter_xml,
+    build_seed_iso,
+    create_overlay_volume,
+    resize_domain_xml,
+    set_domain_filterref_xml,
+)
 from .spec import read_pubkey
+
+# create() が停止中の既存 VM に対して収束(defineXML の最小差分編集)を許す
+# フィールド。それ以外のフィールドの差分は ServerConflict で拒否する。
+# network はインターフェース XML の書き換えだけなら技術的には可能だが、
+# 実運用への影響が大きいためスコープ外とし、明示的に別操作として扱う。
+# 新しい可変フィールドを追加する場合はここに追記する。
+_MUTABLE_FIELDS = frozenset({"memory", "vcpus", "filters"})
 
 STATE_NAMES = {
     libvirt.VIR_DOMAIN_NOSTATE: "nostate",
@@ -87,6 +101,15 @@ class ServerNotRunning(Exception):
     """
 
 
+class ServerRunning(Exception):
+    """create() が可変フィールド差分を収束させる対象 VM が起動中であることを表す。
+
+    稼働中の memory/vcpus/filters 変更はホットプラグ対応(スコープ外)が必要なため、
+    ServerNotRunning と対称的に fail-loud に拒否する(先に stop してから
+    再度 create/PUT する運用を促す)。
+    """
+
+
 def _lookup(conn, name: str):
     """指定した name の管理対象 domain を返す。
 
@@ -135,19 +158,6 @@ def _is_managed(dom) -> bool:
     return True
 
 
-def _spec_matches(dom, spec: dict) -> bool:
-    """保存済み spec と入力 spec が一致するか判定する。
-
-    管理対象外(metadata 無し)は比較対象が無いため不一致扱い(=拒否)とする。
-    """
-    try:
-        return _read_spec(dom) == spec
-    except libvirt.libvirtError as e:
-        if e.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN_METADATA:
-            return False
-        raise
-
-
 def _status_of(dom) -> dict:
     """VM の状態と IP のスナップショットを返す(IP は待たない)。"""
     state = dom.state()[0]
@@ -188,11 +198,14 @@ class ServerManager:
     def create(
         self, spec: dict, secrets: dict[str, str] | None = None
     ) -> tuple[dict, bool]:
-        """VM を宣言的・冪等に作成し、(spec と状態, 新規作成か) を返す。
+        """VM を宣言的に作成/収束し、(spec と状態, 新規作成か) を返す。
 
-        既存と spec が一致すれば無変更で現状を返し、相違 or 管理対象外なら破壊せず
-        ServerConflict で拒否する。新規は metadata を起動前に付け、失敗時は teardown で
-        巻き戻して all-or-nothing にする。
+        既存と spec が完全一致すれば無変更で現状を返す(冪等 no-op)。相違がある場合、
+        差分が _MUTABLE_FIELDS(memory/vcpus/filters)に収まっていれば停止中の domain
+        に限り収束させる(稼働中は ServerRunning で拒否)。それ以外のフィールドの
+        差分、または管理対象外の同名 domain は破壊せず ServerConflict で拒否する。
+        新規作成時は metadata を起動前に付け、失敗時は teardown で巻き戻して
+        all-or-nothing にする。
 
         name 単位ロックで全体を直列化するため、ロック取得後に _find_domain を再評価する
         (ロック前の判定は信用しない)。同名 overlay volume の delete→再作成
@@ -204,27 +217,85 @@ class ServerManager:
 
         Returns:
             (result, created) のタプル。result は spec と status をキーに持つ dict。
-            created は新規作成なら True、既存一致の冪等 no-op なら False。
+            created は新規作成なら True、既存一致の冪等 no-op・収束なら False。
 
         Raises:
-            ServerConflict: 既存と spec が相違、または管理対象外の場合。
+            ServerConflict: 不変フィールドの差分、または管理対象外の同名 domain の場合。
+            ServerRunning: 可変フィールドの差分があり、対象 VM が起動中の場合。
         """
         name = spec["name"]
         with self._lock_for(name):
             existing = _find_domain(self.conn, name)
-            if existing is not None:
-                if _spec_matches(existing, spec):
-                    return self.get(name), False
+            if existing is None:
+                try:
+                    dom = provision(self.conn, spec, secrets=secrets)
+                    _write_spec(dom, spec)
+                    dom.create()
+                except Exception:
+                    teardown(self.conn, {"name": name})
+                    raise
+                return self.get(name), True
+
+            if not _is_managed(existing):
                 raise ServerConflict(name)
 
-            try:
-                dom = provision(self.conn, spec, secrets=secrets)
-                _write_spec(dom, spec)
-                dom.create()
-            except Exception:
-                teardown(self.conn, {"name": name})
-                raise
-            return self.get(name), True
+            old_spec = _read_spec(existing)
+            if old_spec == spec:
+                return self.get(name), False
+
+            diff_keys = {k for k, v in spec.items() if old_spec.get(k) != v}
+            if diff_keys - _MUTABLE_FIELDS:
+                raise ServerConflict(name)
+            if existing.isActive():
+                raise ServerRunning(name)
+
+            dom = self._converge(existing, old_spec, spec, diff_keys)
+            # _write_spec が失敗しても domain 実体側はロールバックしない。_converge の
+            # 各操作(resize/filterref 設定/nwfilter 定義・削除)は全遷移パターンで冪等
+            # なため、同じ spec で create() を再実行すれば自己修復する。
+            _write_spec(dom, spec)
+            return self.get(name), False
+
+    def _converge(self, dom, old_spec: dict, new_spec: dict, diff_keys: set) -> object:
+        """可変フィールド(memory/vcpus/filters)の差分を、停止中の domain に適用する。
+
+        dom.XMLDesc(INACTIVE) を最小差分編集して defineXML する(build_domain_xml に
+        よるテンプレート再構築ではなく既存定義への差分編集にすることで、MAC アドレス・
+        UUID の意図しない再生成を避ける)。nwfilter は使用中(domain の filterref から
+        参照されている間)は undefine できないため(teardown() 参照)、フィルタ解除時は
+        defineXML で filterref を外した後に undefine する。フィルタ新設時は逆に
+        nwfilterDefineXML で先に定義してから defineXML で filterref を付ける
+        (provision() と同じ順序)。undefine 前には teardown() と同じく存在確認する
+        (_write_spec 失敗後に create() が再実行された場合、前回既に undefine 済みの
+        filter に対して呼ばれる可能性があるため)。
+
+        Returns:
+            defineXML 後の domain(filters/memory/vcpus のいずれの差分も無ければ
+            引数の dom をそのまま返す)。
+        """
+        xml = dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+
+        if diff_keys & {"memory", "vcpus"}:
+            xml = resize_domain_xml(xml, new_spec["memory"] * 1024, new_spec["vcpus"])
+
+        filter_name = None
+        should_undefine = False
+        if "filters" in diff_keys:
+            filter_name = _filter_name(new_spec)
+            has_filter = new_spec.get("filters") is not None
+            should_undefine = old_spec.get("filters") is not None and not has_filter
+            if has_filter:
+                self.conn.nwfilterDefineXML(build_nwfilter_xml(new_spec))
+            xml = set_domain_filterref_xml(xml, filter_name if has_filter else None)
+
+        dom = self.conn.defineXML(xml)
+
+        if should_undefine and filter_name in {
+            f.name() for f in self.conn.listAllNWFilters()
+        }:
+            self.conn.nwfilterLookupByName(filter_name).undefine()
+
+        return dom
 
     def get(self, name: str) -> dict:
         """指定した VM の spec と状態を返す。

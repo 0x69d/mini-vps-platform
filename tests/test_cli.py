@@ -5,7 +5,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from mini_vps import cli
-from mini_vps.manager import ServerConflict, ServerNotFound, ServerNotRunning
+from mini_vps.manager import (
+    ServerConflict,
+    ServerNotFound,
+    ServerNotRunning,
+    ServerRunning,
+)
 from mini_vps.startup_scripts import StartupScriptError
 
 SPEC_YAML = """\
@@ -227,6 +232,19 @@ def test_create_returns_exit_code_3_on_conflict(mock_manager, tmp_path):
     )
 
     assert exit_code == 3
+
+
+def test_create_returns_exit_code_5_when_running(mock_manager, tmp_path):
+    """可変フィールド差分の収束は稼働中の VM には適用できない。"""
+    mock_manager.create.side_effect = ServerRunning("web-1")
+    spec_file = tmp_path / "vm.yaml"
+    spec_file.write_text(SPEC_YAML)
+
+    exit_code = cli.main(
+        ["create", str(spec_file)], manager_factory=_factory(mock_manager)
+    )
+
+    assert exit_code == 5
 
 
 def test_create_returns_exit_code_1_when_file_missing(mock_manager, tmp_path):

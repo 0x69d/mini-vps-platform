@@ -17,6 +17,7 @@ from .manager import (
     ServerManager,
     ServerNotFound,
     ServerNotRunning,
+    ServerRunning,
     register_quiet_error_handler,
 )
 from .spec import ServerSpec, ServerSpecInput
@@ -91,6 +92,12 @@ async def _not_running_handler(request: Request, exc: ServerNotRunning) -> JSONR
     )
 
 
+@app.exception_handler(ServerRunning)
+async def _running_handler(request: Request, exc: ServerRunning) -> JSONResponse:
+    """ServerRunning を 409 に変換する。"""
+    return JSONResponse(status_code=409, content={"detail": f"server running: {exc}"})
+
+
 @app.exception_handler(StartupScriptError)
 async def _startup_script_error_handler(
     request: Request, exc: StartupScriptError
@@ -126,9 +133,11 @@ def put_server(
     response: Response,
     mgr: ServerManager = Depends(get_manager),
 ) -> dict:
-    """VM を宣言的・冪等に作成/収束する。
+    """VM を宣言的に作成/収束する。
 
-    新規作成なら 201、既存 spec と一致する no-op なら 200。spec 相違や管理外の
+    新規作成なら 201。既存 spec と完全一致する no-op、または memory/vcpus/filters
+    のみの差分を収束させた場合は 200(収束は対象 VM がドメイン停止中の場合のみ、
+    稼働中なら 409/ServerRunning)。それ以外のフィールドの差分、または管理外の
     同名 domain は 409(ServerConflict)。body は name を除く spec と secrets。
     """
     # 201/200 の判定は create が name ロック内で原子的に行う(created を返す)。

@@ -12,6 +12,8 @@ from mini_vps.resources import (
     build_seed_iso,
     create_overlay_volume,
     ensure_pool,
+    resize_domain_xml,
+    set_domain_filterref_xml,
 )
 from mini_vps.startup_scripts import StartupScriptError
 
@@ -118,6 +120,121 @@ def test_build_domain_xml_defaults_network_when_absent():
     del spec["network"]
     xml = build_domain_xml(spec, "/overlay.qcow2", "/seed.iso")
     assert "source network='default'" in xml
+
+
+# --- resize_domain_xml ---
+
+# dom.XMLDesc(VIR_DOMAIN_XML_INACTIVE) が返す実定義を模したフィクスチャ。
+# uuid/mac は resize 前後で不変であることを検証する基準値。
+_INACTIVE_DOMAIN_XML_WITH_CURRENT_MEMORY = """
+<domain type='kvm'>
+  <name>web-1</name>
+  <uuid>4dc9c6c3-36ce-41b8-a33f-5421eb4e58a4</uuid>
+  <memory unit='KiB'>1048576</memory>
+  <currentMemory unit='KiB'>1048576</currentMemory>
+  <vcpu placement='static'>2</vcpu>
+  <devices>
+    <interface type='network'>
+      <mac address='52:54:00:12:34:56'/>
+      <source network='default'/>
+    </interface>
+  </devices>
+</domain>
+"""
+
+_INACTIVE_DOMAIN_XML_WITHOUT_CURRENT_MEMORY = """
+<domain type='kvm'>
+  <name>web-1</name>
+  <uuid>4dc9c6c3-36ce-41b8-a33f-5421eb4e58a4</uuid>
+  <memory unit='KiB'>1048576</memory>
+  <vcpu>2</vcpu>
+  <devices>
+    <interface type='network'>
+      <mac address='52:54:00:12:34:56'/>
+    </interface>
+  </devices>
+</domain>
+"""
+
+
+def test_resize_domain_xml_updates_memory_and_vcpu():
+    xml = resize_domain_xml(
+        _INACTIVE_DOMAIN_XML_WITH_CURRENT_MEMORY, memory_kib=2097152, vcpus=4
+    )
+    assert '<memory unit="KiB">2097152</memory>' in xml
+    assert '<currentMemory unit="KiB">2097152</currentMemory>' in xml
+    # 既存属性(placement)は書き換え対象外なので保持される
+    assert '<vcpu placement="static">4</vcpu>' in xml
+
+
+def test_resize_domain_xml_adds_missing_current_memory():
+    xml = resize_domain_xml(
+        _INACTIVE_DOMAIN_XML_WITHOUT_CURRENT_MEMORY, memory_kib=2097152, vcpus=2
+    )
+    assert '<currentMemory unit="KiB">2097152</currentMemory>' in xml
+    assert '<memory unit="KiB">2097152</memory>' in xml
+
+
+def test_resize_domain_xml_preserves_uuid_and_mac():
+    xml = resize_domain_xml(
+        _INACTIVE_DOMAIN_XML_WITH_CURRENT_MEMORY, memory_kib=2097152, vcpus=4
+    )
+    assert "<uuid>4dc9c6c3-36ce-41b8-a33f-5421eb4e58a4</uuid>" in xml
+    assert '<mac address="52:54:00:12:34:56" />' in xml
+
+
+# --- set_domain_filterref_xml ---
+
+# resize_domain_xml と同じ、dom.XMLDesc(VIR_DOMAIN_XML_INACTIVE) を模したフィクスチャ。
+_INACTIVE_DOMAIN_XML_WITHOUT_FILTERREF = _INACTIVE_DOMAIN_XML_WITH_CURRENT_MEMORY
+
+_INACTIVE_DOMAIN_XML_WITH_FILTERREF = """
+<domain type='kvm'>
+  <name>web-1</name>
+  <uuid>4dc9c6c3-36ce-41b8-a33f-5421eb4e58a4</uuid>
+  <memory unit='KiB'>1048576</memory>
+  <currentMemory unit='KiB'>1048576</currentMemory>
+  <vcpu placement='static'>2</vcpu>
+  <devices>
+    <interface type='network'>
+      <mac address='52:54:00:12:34:56'/>
+      <source network='default'/>
+      <filterref filter='minivps-web-1'/>
+    </interface>
+  </devices>
+</domain>
+"""
+
+
+def test_set_domain_filterref_xml_adds_when_absent():
+    xml = set_domain_filterref_xml(
+        _INACTIVE_DOMAIN_XML_WITHOUT_FILTERREF, "minivps-web-1"
+    )
+    assert '<filterref filter="minivps-web-1" />' in xml
+
+
+def test_set_domain_filterref_xml_removes_when_present():
+    xml = set_domain_filterref_xml(_INACTIVE_DOMAIN_XML_WITH_FILTERREF, None)
+    assert "filterref" not in xml
+
+
+def test_set_domain_filterref_xml_replaces_existing_name():
+    xml = set_domain_filterref_xml(
+        _INACTIVE_DOMAIN_XML_WITH_FILTERREF, "minivps-web-1-v2"
+    )
+    assert xml.count("<filterref") == 1
+    assert '<filterref filter="minivps-web-1-v2" />' in xml
+
+
+def test_set_domain_filterref_xml_is_noop_when_absent_and_none():
+    xml = set_domain_filterref_xml(_INACTIVE_DOMAIN_XML_WITHOUT_FILTERREF, None)
+    assert "filterref" not in xml
+
+
+def test_set_domain_filterref_xml_preserves_uuid_and_mac():
+    xml = set_domain_filterref_xml(_INACTIVE_DOMAIN_XML_WITH_FILTERREF, None)
+    assert "<uuid>4dc9c6c3-36ce-41b8-a33f-5421eb4e58a4</uuid>" in xml
+    assert '<mac address="52:54:00:12:34:56" />' in xml
 
 
 # --- ensure_pool (Mock) ---
