@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from mini_vps.config import POOL_NAME, SEED_DIR
+from mini_vps.config import POOL_NAME, POOL_XML
 from mini_vps.resources import (
     _filter_name,
     build_domain_xml,
@@ -248,7 +248,7 @@ def test_ensure_pool_returns_existing_active_pool_without_starting():
     pool = conn.storagePoolLookupByName.return_value
     pool.isActive.return_value = True
 
-    result = ensure_pool(conn, POOL_NAME)
+    result = ensure_pool(conn, POOL_NAME, POOL_XML)
 
     assert result is pool
     pool.create.assert_not_called()
@@ -262,7 +262,7 @@ def test_ensure_pool_starts_existing_inactive_pool():
     pool = conn.storagePoolLookupByName.return_value
     pool.isActive.return_value = False
 
-    ensure_pool(conn, POOL_NAME)
+    ensure_pool(conn, POOL_NAME, POOL_XML)
 
     pool.create.assert_called_once_with(0)
 
@@ -272,9 +272,10 @@ def test_ensure_pool_defines_new_pool_when_absent():
     conn.listAllStoragePools.return_value = []
     pool = conn.storagePoolDefineXML.return_value
 
-    result = ensure_pool(conn, POOL_NAME)
+    result = ensure_pool(conn, POOL_NAME, POOL_XML)
 
     assert result is pool
+    conn.storagePoolDefineXML.assert_called_once_with(POOL_XML, 0)
     pool.build.assert_called_once_with(0)
     pool.create.assert_called_once_with(0)
     pool.setAutostart.assert_called_once_with(1)
@@ -288,7 +289,7 @@ def test_create_overlay_volume_deletes_existing_before_recreate(monkeypatch):
     base_pool = conn.storagePoolLookupByName.return_value
     base_pool.storageVolLookupByName.return_value.path.return_value = "/images/base.img"
     pool = MagicMock()
-    monkeypatch.setattr("mini_vps.resources.ensure_pool", lambda c, n: pool)
+    monkeypatch.setattr("mini_vps.resources.ensure_pool", lambda c, n, x: pool)
     existing_vol = MagicMock()
     existing_vol.name.return_value = "web-1.qcow2"
     pool.listAllVolumes.return_value = [existing_vol]
@@ -306,7 +307,7 @@ def test_create_overlay_volume_skips_delete_when_absent(monkeypatch):
     base_pool = conn.storagePoolLookupByName.return_value
     base_pool.storageVolLookupByName.return_value.path.return_value = "/images/base.img"
     pool = MagicMock()
-    monkeypatch.setattr("mini_vps.resources.ensure_pool", lambda c, n: pool)
+    monkeypatch.setattr("mini_vps.resources.ensure_pool", lambda c, n, x: pool)
     pool.listAllVolumes.return_value = []
 
     create_overlay_volume(conn, _spec())
@@ -318,48 +319,68 @@ def test_create_overlay_volume_skips_delete_when_absent(monkeypatch):
 # --- build_seed_iso (Mock) ---
 
 
+def _seed_pool_mock(monkeypatch, existing_names=()):
+    """ensure_seed_pool をモック化し、指定名の volume が既存であるプールを返す。"""
+    pool = MagicMock()
+    monkeypatch.setattr("mini_vps.resources.ensure_seed_pool", lambda c: pool)
+    existing_vols = []
+    for existing_name in existing_names:
+        vol = MagicMock()
+        vol.name.return_value = existing_name
+        existing_vols.append(vol)
+    pool.listAllVolumes.return_value = existing_vols
+    pool.createXML.return_value.path.return_value = "/seeds/web-1-seed.iso"
+    return pool
+
+
+def _fake_run_writes_dummy_iso(cmd, check):
+    # subprocess.run はまだ一時ディレクトリが存在するタイミングで呼ばれるため、
+    # ここで書き出さないと with ブロックを抜けた時点でファイルごと削除されてしまう。
+    # cmd = ["cloud-localds", iso_path, ud_file_path, md_file_path]
+    Path(cmd[1]).write_bytes(b"dummy-iso-bytes")
+
+
 def test_build_seed_iso_writes_expected_cloud_init_content(monkeypatch):
     captured = {}
 
     def fake_run(cmd, check):
-        # subprocess.run はまだ一時ディレクトリが存在するタイミングで呼ばれるため、
-        # ここで読まないと with ブロックを抜けた時点でファイルごと削除されてしまう。
         captured["user_data"] = Path(cmd[2]).read_text()
         captured["meta_data"] = Path(cmd[3]).read_text()
         captured["cmd"] = cmd
+        _fake_run_writes_dummy_iso(cmd, check)
 
     monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
-    monkeypatch.setattr("mini_vps.resources.os.path.exists", lambda p: False)
+    conn = MagicMock()
+    pool = _seed_pool_mock(monkeypatch)
 
     spec = _spec(name="web-1", hostname="web-1", user="ubuntu")
-    seed_path = build_seed_iso(spec, "ssh-ed25519 AAAA...")
+    seed_path = build_seed_iso(conn, spec, "ssh-ed25519 AAAA...")
 
     assert captured["cmd"][0] == "cloud-localds"
     assert "ssh-ed25519 AAAA..." in captured["user_data"]
     assert "web-1" in captured["meta_data"]
-    assert seed_path == f"{SEED_DIR}/web-1-seed.iso"
+    assert seed_path == pool.createXML.return_value.path.return_value
 
 
 def test_build_seed_iso_deletes_existing_seed_before_recreate(monkeypatch):
-    monkeypatch.setattr("mini_vps.resources.os.path.exists", lambda p: True)
-    remove_mock = MagicMock()
-    monkeypatch.setattr("mini_vps.resources.os.remove", remove_mock)
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", MagicMock())
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", _fake_run_writes_dummy_iso)
+    conn = MagicMock()
+    pool = _seed_pool_mock(monkeypatch, existing_names=["web-1-seed.iso"])
 
-    seed_path = build_seed_iso(_spec(name="web-1"), "ssh-ed25519 AAAA...")
+    build_seed_iso(conn, _spec(name="web-1"), "ssh-ed25519 AAAA...")
 
-    remove_mock.assert_called_once_with(seed_path)
+    pool.storageVolLookupByName.assert_called_once_with("web-1-seed.iso")
+    pool.storageVolLookupByName.return_value.delete.assert_called_once_with(0)
 
 
 def test_build_seed_iso_skips_delete_when_seed_absent(monkeypatch):
-    monkeypatch.setattr("mini_vps.resources.os.path.exists", lambda p: False)
-    remove_mock = MagicMock()
-    monkeypatch.setattr("mini_vps.resources.os.remove", remove_mock)
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", MagicMock())
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", _fake_run_writes_dummy_iso)
+    conn = MagicMock()
+    pool = _seed_pool_mock(monkeypatch)
 
-    build_seed_iso(_spec(name="web-1"), "ssh-ed25519 AAAA...")
+    build_seed_iso(conn, _spec(name="web-1"), "ssh-ed25519 AAAA...")
 
-    remove_mock.assert_not_called()
+    pool.storageVolLookupByName.assert_not_called()
 
 
 def test_build_seed_iso_omits_write_files_when_no_startup_script(monkeypatch):
@@ -367,11 +388,13 @@ def test_build_seed_iso_omits_write_files_when_no_startup_script(monkeypatch):
 
     def fake_run(cmd, check):
         captured["user_data"] = Path(cmd[2]).read_text()
+        _fake_run_writes_dummy_iso(cmd, check)
 
     monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
-    monkeypatch.setattr("mini_vps.resources.os.path.exists", lambda p: False)
+    conn = MagicMock()
+    _seed_pool_mock(monkeypatch)
 
-    build_seed_iso(_spec(name="web-1"), "ssh-ed25519 AAAA...")
+    build_seed_iso(conn, _spec(name="web-1"), "ssh-ed25519 AAAA...")
 
     parsed = yaml.safe_load(captured["user_data"])
     assert "write_files" not in parsed
@@ -385,12 +408,16 @@ def test_build_seed_iso_includes_write_files_and_runcmd_when_startup_script_set(
 
     def fake_run(cmd, check):
         captured["user_data"] = Path(cmd[2]).read_text()
+        _fake_run_writes_dummy_iso(cmd, check)
 
     monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
-    monkeypatch.setattr("mini_vps.resources.os.path.exists", lambda p: False)
+    conn = MagicMock()
+    _seed_pool_mock(monkeypatch)
 
     spec = _spec(name="web-1", startup_script="opencode-sakura-ai-engine")
-    build_seed_iso(spec, "ssh-ed25519 AAAA...", secrets={"AI_ENGINE_TOKEN": "sk-abc"})
+    build_seed_iso(
+        conn, spec, "ssh-ed25519 AAAA...", secrets={"AI_ENGINE_TOKEN": "sk-abc"}
+    )
 
     parsed = yaml.safe_load(captured["user_data"])
     assert "write_files" in parsed
@@ -403,12 +430,13 @@ def test_build_seed_iso_propagates_missing_secret_error_before_cloud_localds(
 ):
     run_mock = MagicMock()
     monkeypatch.setattr("mini_vps.resources.subprocess.run", run_mock)
-    monkeypatch.setattr("mini_vps.resources.os.path.exists", lambda p: False)
+    conn = MagicMock()
+    _seed_pool_mock(monkeypatch)
 
     spec = _spec(name="web-1", startup_script="opencode-sakura-ai-engine")
 
     with pytest.raises(StartupScriptError):
-        build_seed_iso(spec, "ssh-ed25519 AAAA...", secrets=None)
+        build_seed_iso(conn, spec, "ssh-ed25519 AAAA...", secrets=None)
 
     # secrets 不足を検知した時点で失敗するため、cloud-localds は一切呼ばれない
     run_mock.assert_not_called()

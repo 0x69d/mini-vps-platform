@@ -1,11 +1,10 @@
 """VM のプロビジョニングと削除。"""
 
-import os
 import time
 
 import libvirt
 
-from .config import POOL_NAME, SEED_DIR
+from .config import POOL_NAME, SEED_POOL_NAME
 from .resources import (
     _filter_name,
     build_domain_xml,
@@ -37,7 +36,7 @@ def provision(conn, spec, secrets: dict[str, str] | None = None) -> libvirt.virD
         conn.nwfilterDefineXML(build_nwfilter_xml(spec))
         filter_name = _filter_name(spec)
 
-    seed_path = build_seed_iso(spec, read_pubkey(), secrets=secrets)
+    seed_path = build_seed_iso(conn, spec, read_pubkey(), secrets=secrets)
     overlay_path = create_overlay_volume(conn, spec)
     xml = build_domain_xml(spec, overlay_path, seed_path, filter_name=filter_name)
     return conn.defineXML(xml)
@@ -97,6 +96,8 @@ def teardown(conn, spec) -> None:
             pool.storageVolLookupByName(vol_name).delete(0)
 
     # seed
-    seed_path = f"{SEED_DIR}/{spec['name']}-seed.iso"
-    if os.path.exists(seed_path):
-        os.remove(seed_path)
+    seed_vol_name = f"{spec['name']}-seed.iso"
+    if SEED_POOL_NAME in {p.name() for p in conn.listAllStoragePools()}:
+        seed_pool = conn.storagePoolLookupByName(SEED_POOL_NAME)
+        if seed_vol_name in {v.name() for v in seed_pool.listAllVolumes()}:
+            seed_pool.storageVolLookupByName(seed_vol_name).delete(0)

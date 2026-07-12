@@ -821,7 +821,9 @@ def test_reinstall_destroys_active_domain_before_recreate(monkeypatch):
 
     dom.destroy.assert_called_once()
     dom.create.assert_called_once()
-    build_seed_mock.assert_called_once_with(spec, "ssh-ed25519 AAAA", secrets=None)
+    build_seed_mock.assert_called_once_with(
+        conn, spec, "ssh-ed25519 AAAA", secrets=None
+    )
     create_overlay_mock.assert_called_once_with(conn, spec)
     ensure_network_mock.assert_called_once_with(conn, spec)
 
@@ -864,4 +866,6 @@ def test_reinstall_forwards_secrets_to_build_seed_iso(monkeypatch):
 
     mgr.reinstall("web-1", secrets=secrets)
 
-    build_seed_mock.assert_called_once_with(spec, "ssh-ed25519 AAAA", secrets=secrets)
+    build_seed_mock.assert_called_once_with(
+        conn, spec, "ssh-ed25519 AAAA", secrets=secrets
+    )
