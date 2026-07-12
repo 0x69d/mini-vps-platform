@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .config import LIBVIRT_URI
+from .lifecycle import FiltersUnsupported
 from .manager import (
     ServerConflict,
     ServerManager,
@@ -105,6 +106,20 @@ async def _startup_script_error_handler(
     """StartupScriptError を 422 に変換する(pydantic 検証エラーと同じ意味論)。"""
     return JSONResponse(
         status_code=422, content={"detail": f"startup script error: {exc}"}
+    )
+
+
+@app.exception_handler(FiltersUnsupported)
+async def _filters_unsupported_handler(
+    request: Request, exc: FiltersUnsupported
+) -> JSONResponse:
+    """FiltersUnsupported を 422 に変換する(spec とホスト構成の非互換)。
+
+    409 だと「対象 VM の状態を変えれば通る」と誤誘導するため、
+    StartupScriptError と同じ 422 に寄せる。
+    """
+    return JSONResponse(
+        status_code=422, content={"detail": f"filters unsupported: {exc}"}
     )
 
 

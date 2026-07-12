@@ -11,8 +11,20 @@ from .resources import (
     build_nwfilter_xml,
     build_seed_iso,
     create_overlay_volume,
+    is_ovs_network_xml,
 )
 from .spec import read_pubkey
+
+
+class FiltersUnsupported(Exception):
+    """VM spec の filters が対象ネットワーク上では実施できないことを表す。
+
+    nwfilter は ebtables/Linux ブリッジ前提のため、OVS ブリッジ接続の
+    ネットワークでは定義できても実際には効かない(素通しになる)。黙って
+    無防備な VM を作らないために fail-loud に拒否する。将来 OVS フロー
+    (OpenFlow)ベースのフィルタを実装する場合は ensure_filters_enforceable
+    の中で方式を選択・適用する(呼び出し側は変更しない)。
+    """
 
 
 def ensure_network_active(conn, spec) -> None:
@@ -22,13 +34,45 @@ def ensure_network_active(conn, spec) -> None:
         net.create()
 
 
+def is_ovs_network(conn, name: str) -> bool:
+    """指定名の libvirt ネットワークが OVS ブリッジ接続かを判定する。
+
+    未定義のネットワーク名は libvirtError をそのまま伝播させる
+    (ensure_network_active と同じ意味論)。
+    """
+    return is_ovs_network_xml(conn.networkLookupByName(name).XMLDesc(0))
+
+
+def ensure_filters_enforceable(conn, spec) -> None:
+    """VM spec の filters が対象ネットワーク上で実際に効くことを保証する。
+
+    filters 未指定(None)なら何もしない。filters=[] は「全 inbound 拒否」
+    という有効なフィルタ指定のため検証対象に含める。
+
+    Raises:
+        FiltersUnsupported: filters 指定があり network が OVS 接続の場合。
+    """
+    if spec.get("filters") is None:
+        return
+    network = spec.get("network", "default")
+    if is_ovs_network(conn, network):
+        raise FiltersUnsupported(
+            f"filters cannot be enforced on OVS network: {network}"
+        )
+
+
 def provision(conn, spec, secrets: dict[str, str] | None = None) -> libvirt.virDomain:
     """VM を定義し、未起動の domain を返す。
 
     nwfilter(任意) → seed → overlay → domain XML → defineXML の順に処理する。
     起動は呼び出し側が行う(起動前に metadata を付与するため)。seed を overlay
-    より先に作るのは、secrets 不足を安価に検知するため。
+    より先に作るのは、secrets 不足を安価に検知するため。同様に filters の
+    実施可能性はリソースを一切作る前に検証する。
+
+    Raises:
+        FiltersUnsupported: filters 指定があり network が OVS 接続の場合。
     """
+    ensure_filters_enforceable(conn, spec)
     ensure_network_active(conn, spec)
 
     filter_name = None

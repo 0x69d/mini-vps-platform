@@ -11,7 +11,13 @@ import libvirt
 import yaml
 
 from .config import METADATA_KEY, METADATA_NS
-from .lifecycle import ensure_network_active, get_domain_ipv4, provision, teardown
+from .lifecycle import (
+    ensure_filters_enforceable,
+    ensure_network_active,
+    get_domain_ipv4,
+    provision,
+    teardown,
+)
 from .resources import (
     _filter_name,
     build_nwfilter_xml,
@@ -222,6 +228,7 @@ class ServerManager:
         Raises:
             ServerConflict: 不変フィールドの差分、または管理対象外の同名 domain の場合。
             ServerRunning: 可変フィールドの差分があり、対象 VM が起動中の場合。
+            FiltersUnsupported: filters 指定があり network が OVS 接続の場合。
         """
         name = spec["name"]
         with self._lock_for(name):
@@ -238,6 +245,10 @@ class ServerManager:
 
             if not _is_managed(existing):
                 raise ServerConflict(name)
+
+            # 新規経路は provision 内で検証済み。既存経路は冪等 no-op を含めて
+            # ここで検証し、filters が素通しの VM の存在を fail-loud に可視化する。
+            ensure_filters_enforceable(self.conn, spec)
 
             old_spec = _read_spec(existing)
             if old_spec == spec:
@@ -361,11 +372,14 @@ class ServerManager:
 
         Raises:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+            FiltersUnsupported: filters 指定があり network が OVS 接続の場合。
         """
         with self._lock_for(name):
             dom = _lookup(self.conn, name)
             if not dom.isActive():
-                ensure_network_active(self.conn, _read_spec(dom))
+                spec = _read_spec(dom)
+                ensure_filters_enforceable(self.conn, spec)
+                ensure_network_active(self.conn, spec)
                 dom.create()
             return self.get(name)
 
@@ -407,13 +421,17 @@ class ServerManager:
         Raises:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
             ServerNotRunning: force=False で対象 VM が停止中の場合。
+            FiltersUnsupported: force=True で filters 指定があり network が
+                OVS 接続の場合(destroy 前に検証し、起動し直せない電源断を防ぐ)。
         """
         with self._lock_for(name):
             dom = _lookup(self.conn, name)
             if force:
+                spec = _read_spec(dom)
+                ensure_filters_enforceable(self.conn, spec)
                 if dom.isActive():
                     dom.destroy()
-                ensure_network_active(self.conn, _read_spec(dom))
+                ensure_network_active(self.conn, spec)
                 dom.create()
             else:
                 if not dom.isActive():
@@ -436,10 +454,13 @@ class ServerManager:
 
         Raises:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+            FiltersUnsupported: filters 指定があり network が OVS 接続の場合
+                (seed 再作成・overlay 破棄より前に検証する)。
         """
         with self._lock_for(name):
             dom = _lookup(self.conn, name)
             spec = _read_spec(dom)
+            ensure_filters_enforceable(self.conn, spec)
 
             # overlay 再作成(破壊的)より前に seed を作り直す
             build_seed_iso(self.conn, spec, read_pubkey(), secrets=secrets)

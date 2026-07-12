@@ -164,6 +164,16 @@ def build_nwfilter_xml(spec) -> str:
     return NWFILTER_XML_TEMPLATE.format(name=_filter_name(spec), port_rules=port_rules)
 
 
+def is_ovs_network_xml(xml_text: str) -> bool:
+    """ネットワーク XML が OVS ブリッジ接続かを判定する外部依存ゼロの純粋関数。
+
+    libvirt が OVS 接続のネットワーク定義に要求する
+    <virtualport type='openvswitch'/> の有無で判定する。
+    """
+    el = ET.fromstring(xml_text).find("virtualport")
+    return el is not None and el.get("type") == "openvswitch"
+
+
 def build_domain_xml(spec, overlay_path, seed_path, filter_name=None) -> str:
     """Domain XML 文字列を組み立てて返す。
 

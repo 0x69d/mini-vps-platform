@@ -6,15 +6,22 @@ from conftest import make_libvirt_error
 
 from mini_vps.config import POOL_NAME, SEED_POOL_NAME
 from mini_vps.lifecycle import (
+    FiltersUnsupported,
     _agent_ipv4,
     _first_ipv4,
     _lease_ipv4,
+    ensure_filters_enforceable,
     ensure_network_active,
     get_domain_ipv4,
+    is_ovs_network,
     provision,
     teardown,
     wait_for_ip,
 )
+
+# libvirt ネットワーク XML の最小フィクスチャ(OVS 判定に必要な要素のみ)。
+_OVS_NET_XML = "<network><virtualport type='openvswitch'/></network>"
+_NAT_NET_XML = "<network><forward mode='nat'/></network>"
 
 # --- ensure_network_active ---
 
@@ -41,11 +48,76 @@ def test_ensure_network_active_skips_when_already_active():
     net.create.assert_not_called()
 
 
+# --- is_ovs_network / ensure_filters_enforceable ---
+
+
+def test_is_ovs_network_looks_up_by_name():
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _OVS_NET_XML
+
+    assert is_ovs_network(conn, "seg1") is True
+    conn.networkLookupByName.assert_called_once_with("seg1")
+
+
+def test_ensure_filters_enforceable_noop_without_filters():
+    conn = MagicMock()
+
+    ensure_filters_enforceable(conn, {"name": "web-1", "network": "seg1"})
+
+    conn.networkLookupByName.assert_not_called()
+
+
+def test_ensure_filters_enforceable_rejects_filters_on_ovs_network():
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _OVS_NET_XML
+    spec = {
+        "name": "web-1",
+        "network": "seg1",
+        "filters": [{"port": 22, "protocol": "tcp"}],
+    }
+
+    with pytest.raises(FiltersUnsupported):
+        ensure_filters_enforceable(conn, spec)
+
+
+def test_ensure_filters_enforceable_rejects_empty_filters_on_ovs_network():
+    """filters=[] は「全 inbound 拒否」という有効な指定のため検証対象に含める。"""
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _OVS_NET_XML
+
+    with pytest.raises(FiltersUnsupported):
+        ensure_filters_enforceable(
+            conn, {"name": "web-1", "network": "seg1", "filters": []}
+        )
+
+
+def test_ensure_filters_enforceable_allows_filters_on_nat_network():
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _NAT_NET_XML
+    spec = {
+        "name": "web-1",
+        "network": "seg1",
+        "filters": [{"port": 22, "protocol": "tcp"}],
+    }
+
+    ensure_filters_enforceable(conn, spec)
+
+
+def test_ensure_filters_enforceable_defaults_to_default_network():
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _NAT_NET_XML
+
+    ensure_filters_enforceable(conn, {"name": "web-1", "filters": []})
+
+    conn.networkLookupByName.assert_called_once_with("default")
+
+
 # --- provision ---
 
 
 def test_provision_defines_nwfilter_when_filters_present(monkeypatch):
     conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _NAT_NET_XML
     spec = {"name": "web-1", "filters": [{"port": 22, "protocol": "tcp"}]}
     monkeypatch.setattr("mini_vps.lifecycle.ensure_network_active", MagicMock())
     monkeypatch.setattr("mini_vps.lifecycle.build_nwfilter_xml", lambda s: "<filter/>")
@@ -138,6 +210,26 @@ def test_provision_builds_seed_before_overlay(monkeypatch):
     # secrets 不足による StartupScriptError を、overlay volume 作成という
     # コストのかかる処理の前に検知するための順序(フェイルファスト)
     assert call_order == ["seed", "overlay"]
+
+
+def test_provision_rejects_filters_on_ovs_network_before_creating_resources(
+    monkeypatch,
+):
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _OVS_NET_XML
+    spec = {"name": "web-1", "network": "seg1", "filters": []}
+    build_seed_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.lifecycle.build_seed_iso", build_seed_mock)
+    overlay_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.lifecycle.create_overlay_volume", overlay_mock)
+    monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
+
+    with pytest.raises(FiltersUnsupported):
+        provision(conn, spec)
+
+    conn.nwfilterDefineXML.assert_not_called()
+    build_seed_mock.assert_not_called()
+    overlay_mock.assert_not_called()
 
 
 # --- _first_ipv4 ---

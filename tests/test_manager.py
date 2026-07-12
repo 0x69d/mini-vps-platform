@@ -4,6 +4,7 @@ import libvirt
 import pytest
 from conftest import make_libvirt_error
 
+from mini_vps.lifecycle import FiltersUnsupported
 from mini_vps.manager import (
     ServerConflict,
     ServerManager,
@@ -18,6 +19,12 @@ from mini_vps.manager import (
     _write_spec,
     register_quiet_error_handler,
 )
+
+# libvirt ネットワーク XML の最小フィクスチャ(OVS 判定に必要な要素のみ)。
+# filters を含む spec の操作は ensure_filters_enforceable が network の XML を
+# 参照するため、conn.networkLookupByName(...).XMLDesc(0) の戻り値に設定する。
+_OVS_NET_XML = "<network><virtualport type='openvswitch'/></network>"
+_NAT_NET_XML = "<network><forward mode='nat'/></network>"
 
 # --- register_quiet_error_handler ---
 
@@ -360,6 +367,7 @@ def test_create_converges_filters_none_to_list_defines_and_attaches_filter(
     monkeypatch,
 ):
     conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _NAT_NET_XML
     mgr = ServerManager(conn)
     dom = MagicMock()
     dom.isActive.return_value = False
@@ -393,6 +401,7 @@ def test_create_converges_filters_none_to_empty_list_defines_deny_all_filter(
     ケースで nwfilterDefineXML/filterref 付与が呼ばれなくなり検知できる。
     """
     conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _NAT_NET_XML
     mgr = ServerManager(conn)
     dom = MagicMock()
     dom.isActive.return_value = False
@@ -483,6 +492,7 @@ def test_create_converges_filters_list_to_list_redefines_without_undefining(
     monkeypatch,
 ):
     conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _NAT_NET_XML
     mgr = ServerManager(conn)
     dom = MagicMock()
     dom.isActive.return_value = False
@@ -511,6 +521,7 @@ def test_create_converges_filters_and_memory_together_in_single_definexml(
     monkeypatch,
 ):
     conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _NAT_NET_XML
     mgr = ServerManager(conn)
     dom = MagicMock()
     dom.isActive.return_value = False
@@ -537,6 +548,110 @@ def test_create_converges_filters_and_memory_together_in_single_definexml(
 
     dom.XMLDesc.assert_called_once_with(libvirt.VIR_DOMAIN_XML_INACTIVE)
     conn.defineXML.assert_called_once_with("<domain resized filtered/>")
+
+
+# --- filters × OVS ネットワークの拒否 ---
+
+
+def test_create_rejects_filters_on_ovs_network_when_converging(monkeypatch):
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _OVS_NET_XML
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    old_spec = _full_spec(network="seg1", filters=None)
+    new_spec = _full_spec(network="seg1", filters=[{"port": 22, "protocol": "tcp"}])
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
+
+    with pytest.raises(FiltersUnsupported):
+        mgr.create(new_spec)
+
+    conn.nwfilterDefineXML.assert_not_called()
+    conn.defineXML.assert_not_called()
+
+
+def test_create_rejects_filters_on_ovs_network_even_when_spec_matches(monkeypatch):
+    """冪等 no-op 経路でも検証し、filters が素通しの VM を fail-loud に可視化する。"""
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _OVS_NET_XML
+    mgr = ServerManager(conn)
+    spec = _full_spec(network="seg1", filters=[{"port": 22, "protocol": "tcp"}])
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: MagicMock())
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: dict(spec))
+
+    with pytest.raises(FiltersUnsupported):
+        mgr.create(spec)
+
+
+def test_create_allows_filters_on_nat_network(monkeypatch):
+    """非 OVS ネットワークでは filters 付き spec の冪等 no-op が従来どおり通る。"""
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _NAT_NET_XML
+    mgr = ServerManager(conn)
+    spec = _full_spec(network="seg1", filters=[{"port": 22, "protocol": "tcp"}])
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: MagicMock())
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: dict(spec))
+    mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
+
+    result, created = mgr.create(spec)
+
+    assert created is False
+    assert result == mgr.get.return_value
+
+
+def test_start_rejects_filters_on_ovs_network(monkeypatch):
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _OVS_NET_XML
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    spec = {"name": "web-1", "network": "seg1", "filters": []}
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: spec)
+
+    with pytest.raises(FiltersUnsupported):
+        mgr.start("web-1")
+
+    dom.create.assert_not_called()
+
+
+def test_restart_force_rejects_filters_on_ovs_network_before_destroy(monkeypatch):
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _OVS_NET_XML
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = True
+    spec = {"name": "web-1", "network": "seg1", "filters": []}
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: spec)
+
+    with pytest.raises(FiltersUnsupported):
+        mgr.restart("web-1", force=True)
+
+    # 起動し直せない VM を電源断のまま残さないよう destroy 前に検証する
+    dom.destroy.assert_not_called()
+
+
+def test_reinstall_rejects_filters_on_ovs_network_before_seed_rebuild(monkeypatch):
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _OVS_NET_XML
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    spec = {"name": "web-1", "network": "seg1", "filters": []}
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: spec)
+    build_seed_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager.build_seed_iso", build_seed_mock)
+
+    with pytest.raises(FiltersUnsupported):
+        mgr.reinstall("web-1")
+
+    build_seed_mock.assert_not_called()
+    dom.destroy.assert_not_called()
 
 
 # --- ServerManager.list ---

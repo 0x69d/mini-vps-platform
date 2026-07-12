@@ -17,6 +17,7 @@ import yaml
 from pydantic import ValidationError
 
 from .config import LIBVIRT_URI
+from .lifecycle import FiltersUnsupported
 from .manager import (
     ServerConflict,
     ServerManager,
@@ -126,6 +127,9 @@ def _run_command(func):
         except ServerRunning as e:
             print(f"error: server running: {e}", file=sys.stderr)
             raise typer.Exit(code=5) from None
+        except FiltersUnsupported as e:
+            print(f"error: filters unsupported: {e}", file=sys.stderr)
+            raise typer.Exit(code=6) from None
         except (ValidationError, yaml.YAMLError, OSError, StartupScriptError) as e:
             print(f"error: {e}", file=sys.stderr)
             raise typer.Exit(code=1) from None
@@ -240,7 +244,8 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
     Returns:
         プロセス終了コード(成功 0、ServerNotFound 2、ServerConflict 3、
         ServerNotRunning 4、ServerRunning 5(create が可変フィールド差分を
-        起動中の VM に適用しようとした場合を含む)、spec ファイル関連のエラー 1、
+        起動中の VM に適用しようとした場合を含む)、FiltersUnsupported 6
+        (OVS 接続ネットワークと filters の併用)、spec ファイル関連のエラー 1、
         Typer の使用法エラー 2)。
     """
     factory = manager_factory or _open_manager

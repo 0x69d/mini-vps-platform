@@ -12,6 +12,7 @@ from mini_vps.resources import (
     build_seed_iso,
     create_overlay_volume,
     ensure_pool,
+    is_ovs_network_xml,
     resize_domain_xml,
     set_domain_filterref_xml,
 )
@@ -241,6 +242,60 @@ def test_set_domain_filterref_xml_preserves_uuid_and_mac():
     xml = set_domain_filterref_xml(_INACTIVE_DOMAIN_XML_WITH_FILTERREF, None)
     assert "<uuid>4dc9c6c3-36ce-41b8-a33f-5421eb4e58a4</uuid>" in xml
     assert '<mac address="52:54:00:12:34:56" />' in xml
+
+
+# --- is_ovs_network_xml ---
+
+_OVS_NETWORK_XML = """
+<network>
+  <name>seg1</name>
+  <forward mode='bridge'/>
+  <bridge name='ovs-segments'/>
+  <virtualport type='openvswitch'/>
+  <vlan>
+    <tag id='201'/>
+  </vlan>
+</network>
+"""
+
+_NAT_NETWORK_XML = """
+<network>
+  <name>seg1</name>
+  <forward mode='nat'/>
+  <bridge name='virbr-seg1' stp='on' delay='0'/>
+  <ip address='192.168.201.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.201.2' end='192.168.201.254'/>
+    </dhcp>
+  </ip>
+</network>
+"""
+
+_PLAIN_BRIDGE_NETWORK_XML = """
+<network>
+  <name>host-br</name>
+  <forward mode='bridge'/>
+  <bridge name='br0'/>
+</network>
+"""
+
+
+def test_is_ovs_network_xml_true_for_openvswitch_virtualport():
+    assert is_ovs_network_xml(_OVS_NETWORK_XML) is True
+
+
+def test_is_ovs_network_xml_false_for_nat_network():
+    assert is_ovs_network_xml(_NAT_NETWORK_XML) is False
+
+
+def test_is_ovs_network_xml_false_for_plain_bridge_without_virtualport():
+    assert is_ovs_network_xml(_PLAIN_BRIDGE_NETWORK_XML) is False
+
+
+def test_is_ovs_network_xml_false_for_other_virtualport_type():
+    assert is_ovs_network_xml("<network><virtualport type='802.1Qbg'/></network>") is (
+        False
+    )
 
 
 # --- ensure_pool (Mock) ---

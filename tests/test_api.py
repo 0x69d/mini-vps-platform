@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import mini_vps.api as api_module
+from mini_vps.lifecycle import FiltersUnsupported
 from mini_vps.manager import (
     ServerConflict,
     ServerNotFound,
@@ -137,6 +138,25 @@ def test_put_server_returns_422_on_startup_script_error(client):
     response = test_client.put(
         "/servers/web-1",
         json={**PUT_BODY, "startup_script": "opencode-sakura-ai-engine"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_put_server_returns_422_when_filters_unsupported(client):
+    """OVS 接続ネットワークと filters の併用は 422 で拒否される。"""
+    test_client, mock_manager = client
+    mock_manager.create.side_effect = FiltersUnsupported(
+        "filters cannot be enforced on OVS network: seg1"
+    )
+
+    response = test_client.put(
+        "/servers/web-1",
+        json={
+            **PUT_BODY,
+            "network": "seg1",
+            "filters": [{"port": 22, "protocol": "tcp"}],
+        },
     )
 
     assert response.status_code == 422
