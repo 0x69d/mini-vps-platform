@@ -42,24 +42,67 @@ def provision(conn, spec, secrets: dict[str, str] | None = None) -> libvirt.virD
     return conn.defineXML(xml)
 
 
+def _first_ipv4(ifaces: dict) -> str | None:
+    """インターフェース一覧(interfaceAddresses の戻り値)から最初の IPv4 を返す。
+
+    SRC_AGENT はゲストの全インターフェース(loopback 含む)を返すため、
+    インターフェース名 "lo" と 127.0.0.0/8 のアドレスを除外する。
+    """
+    for name, iface in ifaces.items():
+        if name == "lo":
+            continue
+        for addr in iface["addrs"] or []:
+            if addr["type"] == libvirt.VIR_IP_ADDR_TYPE_IPV4 and not addr[
+                "addr"
+            ].startswith("127."):
+                return addr["addr"]
+    return None
+
+
+def _agent_ipv4(dom: libvirt.virDomain) -> str | None:
+    """qemu-guest-agent 経由で IPv4 を1回だけ取得する。
+
+    agent 未接続・未応答のエラーコードは環境により揺れるため、コードを判別せず
+    「agent 経路の失敗 = None」と扱う(呼び出し側がリースへフォールバックする)。
+    """
+    try:
+        ifaces = dom.interfaceAddresses(
+            libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT
+        )
+    except libvirt.libvirtError:
+        return None
+    return _first_ipv4(ifaces)
+
+
 def _lease_ipv4(dom: libvirt.virDomain) -> str | None:
     """DHCP リースから IPv4 を1回だけ取得する。
 
     libvirt が NIC(MAC) に紐づくリースだけを返すため、古いリースを掴まない。
     """
     ifaces = dom.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE)
-    for iface in ifaces.values():
-        for addr in iface["addrs"]:
-            if addr["type"] == libvirt.VIR_IP_ADDR_TYPE_IPV4:
-                return addr["addr"]
-    return None
+    return _first_ipv4(ifaces)
 
 
-def wait_for_ip(dom: libvirt.virDomain, timeout=120) -> str | None:
-    """DHCP リースをポーリングし、IPv4 が確定するまで待つ(タイムアウト時は None)。"""
+def get_domain_ipv4(dom: libvirt.virDomain) -> str | None:
+    """qemu-guest-agent 優先・リースフォールバックで IPv4 を1回だけ取得する。
+
+    OVS ブリッジ接続の VM は libvirt が DHCP リースを持たないため agent が
+    唯一の情報源。一方、チャネルを持たない既存 VM や agent 起動前のブート初期は
+    libvirt 管理ネットワーク上ならリースで取得できるため、両者を直列に試す。
+    """
+    return _agent_ipv4(dom) or _lease_ipv4(dom)
+
+
+def wait_for_ip(dom: libvirt.virDomain, timeout=300) -> str | None:
+    """IPv4 が確定するまでポーリングして待つ(タイムアウト時は None)。
+
+    OVS セグメントでは cloud-init による qemu-guest-agent の導入完了後に
+    初めて IP を観測できるため、既定タイムアウトはリースのみだった頃の
+    120 秒より長い 300 秒とする。
+    """
     start_time = time.time()
     while time.time() - start_time < timeout:
-        ip = _lease_ipv4(dom)
+        ip = get_domain_ipv4(dom)
         if ip is not None:
             return ip
         time.sleep(2)

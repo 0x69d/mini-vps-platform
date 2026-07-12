@@ -2,11 +2,15 @@ from unittest.mock import MagicMock
 
 import libvirt
 import pytest
+from conftest import make_libvirt_error
 
 from mini_vps.config import POOL_NAME, SEED_POOL_NAME
 from mini_vps.lifecycle import (
+    _agent_ipv4,
+    _first_ipv4,
     _lease_ipv4,
     ensure_network_active,
+    get_domain_ipv4,
     provision,
     teardown,
     wait_for_ip,
@@ -136,6 +140,138 @@ def test_provision_builds_seed_before_overlay(monkeypatch):
     assert call_order == ["seed", "overlay"]
 
 
+# --- _first_ipv4 ---
+
+
+@pytest.mark.parametrize(
+    ("ifaces", "expected"),
+    [
+        # loopback インターフェースは名前で除外する
+        (
+            {
+                "lo": {
+                    "addrs": [
+                        {"type": libvirt.VIR_IP_ADDR_TYPE_IPV4, "addr": "127.0.0.1"}
+                    ]
+                }
+            },
+            None,
+        ),
+        # lo を飛ばして実インターフェースの IPv4 を返す
+        (
+            {
+                "lo": {
+                    "addrs": [
+                        {"type": libvirt.VIR_IP_ADDR_TYPE_IPV4, "addr": "127.0.0.1"}
+                    ]
+                },
+                "ens3": {
+                    "addrs": [
+                        {
+                            "type": libvirt.VIR_IP_ADDR_TYPE_IPV4,
+                            "addr": "192.168.201.10",
+                        }
+                    ]
+                },
+            },
+            "192.168.201.10",
+        ),
+        # 名前が lo でなくても 127.0.0.0/8 のアドレスは除外する
+        (
+            {
+                "dummy0": {
+                    "addrs": [
+                        {"type": libvirt.VIR_IP_ADDR_TYPE_IPV4, "addr": "127.0.1.1"}
+                    ]
+                }
+            },
+            None,
+        ),
+        # SRC_AGENT は addrs が None のインターフェースを返しうる
+        ({"ens3": {"addrs": None}}, None),
+        (
+            {
+                "ens3": {
+                    "addrs": [
+                        {"type": libvirt.VIR_IP_ADDR_TYPE_IPV6, "addr": "fe80::1"}
+                    ]
+                }
+            },
+            None,
+        ),
+    ],
+)
+def test_first_ipv4_skips_loopback_and_non_ipv4(ifaces, expected):
+    assert _first_ipv4(ifaces) == expected
+
+
+# --- _agent_ipv4 ---
+
+
+def test_agent_ipv4_queries_agent_source():
+    dom = MagicMock()
+    dom.interfaceAddresses.return_value = {
+        "ens3": {"addrs": [{"type": libvirt.VIR_IP_ADDR_TYPE_IPV4, "addr": "10.0.0.5"}]}
+    }
+
+    assert _agent_ipv4(dom) == "10.0.0.5"
+    dom.interfaceAddresses.assert_called_once_with(
+        libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT
+    )
+
+
+def test_agent_ipv4_returns_none_when_agent_unavailable():
+    dom = MagicMock()
+    dom.interfaceAddresses.side_effect = make_libvirt_error(
+        libvirt.VIR_ERR_AGENT_UNRESPONSIVE
+    )
+
+    assert _agent_ipv4(dom) is None
+
+
+# --- get_domain_ipv4 ---
+
+
+def test_get_domain_ipv4_prefers_agent(monkeypatch):
+    dom = MagicMock()
+    monkeypatch.setattr(
+        "mini_vps.lifecycle._agent_ipv4", MagicMock(return_value="10.0.0.5")
+    )
+    lease_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.lifecycle._lease_ipv4", lease_mock)
+
+    assert get_domain_ipv4(dom) == "10.0.0.5"
+    lease_mock.assert_not_called()
+
+
+def test_get_domain_ipv4_falls_back_to_lease_when_agent_fails():
+    """agent 未接続(libvirtError)でもリース経路で IP が取れることを検証する。"""
+    dom = MagicMock()
+
+    def fake_interface_addresses(source):
+        if source == libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT:
+            raise make_libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
+        return {
+            "vnet0": {
+                "addrs": [{"type": libvirt.VIR_IP_ADDR_TYPE_IPV4, "addr": "10.0.0.9"}]
+            }
+        }
+
+    dom.interfaceAddresses.side_effect = fake_interface_addresses
+
+    assert get_domain_ipv4(dom) == "10.0.0.9"
+
+
+def test_get_domain_ipv4_falls_back_to_lease_when_agent_has_no_ip(monkeypatch):
+    dom = MagicMock()
+    monkeypatch.setattr("mini_vps.lifecycle._agent_ipv4", MagicMock(return_value=None))
+    monkeypatch.setattr(
+        "mini_vps.lifecycle._lease_ipv4", MagicMock(return_value="10.0.0.9")
+    )
+
+    assert get_domain_ipv4(dom) == "10.0.0.9"
+
+
 # --- _lease_ipv4 ---
 
 
@@ -192,7 +328,7 @@ def test_lease_ipv4_extracts_first_ipv4(ifaces, expected):
 def test_wait_for_ip_returns_once_available(monkeypatch):
     dom = MagicMock()
     monkeypatch.setattr(
-        "mini_vps.lifecycle._lease_ipv4",
+        "mini_vps.lifecycle.get_domain_ipv4",
         MagicMock(side_effect=[None, None, "10.0.0.5"]),
     )
     sleep_mock = MagicMock()
@@ -204,7 +340,9 @@ def test_wait_for_ip_returns_once_available(monkeypatch):
 
 def test_wait_for_ip_times_out_without_sleeping(monkeypatch):
     dom = MagicMock()
-    monkeypatch.setattr("mini_vps.lifecycle._lease_ipv4", MagicMock(return_value=None))
+    monkeypatch.setattr(
+        "mini_vps.lifecycle.get_domain_ipv4", MagicMock(return_value=None)
+    )
     sleep_mock = MagicMock()
     monkeypatch.setattr("mini_vps.lifecycle.time.sleep", sleep_mock)
 

@@ -126,22 +126,22 @@ def test_find_domain_reraises_other_errors():
 def test_status_of_running_includes_ip(monkeypatch):
     dom = MagicMock()
     dom.state.return_value = (libvirt.VIR_DOMAIN_RUNNING, 1)
-    lease = MagicMock(return_value="10.0.0.5")
-    monkeypatch.setattr("mini_vps.manager._lease_ipv4", lease)
+    get_ip = MagicMock(return_value="10.0.0.5")
+    monkeypatch.setattr("mini_vps.manager.get_domain_ipv4", get_ip)
 
     assert _status_of(dom) == {"state": "running", "ip": "10.0.0.5"}
-    lease.assert_called_once_with(dom)
+    get_ip.assert_called_once_with(dom)
 
 
 def test_status_of_non_running_has_no_ip(monkeypatch):
     dom = MagicMock()
     dom.state.return_value = (libvirt.VIR_DOMAIN_SHUTOFF, 1)
-    lease = MagicMock()
-    monkeypatch.setattr("mini_vps.manager._lease_ipv4", lease)
+    get_ip = MagicMock()
+    monkeypatch.setattr("mini_vps.manager.get_domain_ipv4", get_ip)
 
     assert _status_of(dom) == {"state": "shutoff", "ip": None}
-    # 起動中でなければリースは引かない
-    lease.assert_not_called()
+    # 起動中でなければ IP は引かない
+    get_ip.assert_not_called()
 
 
 # --- ServerManager.create ---

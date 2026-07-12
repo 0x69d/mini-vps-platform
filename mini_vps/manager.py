@@ -11,7 +11,7 @@ import libvirt
 import yaml
 
 from .config import METADATA_KEY, METADATA_NS
-from .lifecycle import _lease_ipv4, ensure_network_active, provision, teardown
+from .lifecycle import ensure_network_active, get_domain_ipv4, provision, teardown
 from .resources import (
     _filter_name,
     build_nwfilter_xml,
@@ -161,8 +161,8 @@ def _is_managed(dom) -> bool:
 def _status_of(dom) -> dict:
     """VM の状態と IP のスナップショットを返す(IP は待たない)。"""
     state = dom.state()[0]
-    # 起動中のときだけリースを引く。それ以外は IP 未確定とみなす
-    ip = _lease_ipv4(dom) if state == libvirt.VIR_DOMAIN_RUNNING else None
+    # 起動中のときだけ IP を引く。それ以外は IP 未確定とみなす
+    ip = get_domain_ipv4(dom) if state == libvirt.VIR_DOMAIN_RUNNING else None
     return {"state": STATE_NAMES.get(state, "unknown"), "ip": ip}
 
 
