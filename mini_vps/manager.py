@@ -442,7 +442,7 @@ class ServerManager:
             spec = _read_spec(dom)
 
             # overlay 再作成(破壊的)より前に seed を作り直す
-            build_seed_iso(spec, read_pubkey(), secrets=secrets)
+            build_seed_iso(self.conn, spec, read_pubkey(), secrets=secrets)
 
             if dom.isActive():
                 dom.destroy()

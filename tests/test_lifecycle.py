@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 import libvirt
 import pytest
 
-from mini_vps.config import POOL_NAME, SEED_DIR
+from mini_vps.config import POOL_NAME, SEED_POOL_NAME
 from mini_vps.lifecycle import (
     _lease_ipv4,
     ensure_network_active,
@@ -50,7 +50,8 @@ def test_provision_defines_nwfilter_when_filters_present(monkeypatch):
         "mini_vps.lifecycle.create_overlay_volume", lambda c, s: "/overlay.qcow2"
     )
     monkeypatch.setattr(
-        "mini_vps.lifecycle.build_seed_iso", lambda s, pubkey, secrets=None: "/seed.iso"
+        "mini_vps.lifecycle.build_seed_iso",
+        lambda c, s, pubkey, secrets=None: "/seed.iso",
     )
     monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
     build_domain_xml_mock = MagicMock(return_value="<domain/>")
@@ -73,7 +74,8 @@ def test_provision_skips_nwfilter_when_absent(monkeypatch):
         "mini_vps.lifecycle.create_overlay_volume", lambda c, s: "/overlay.qcow2"
     )
     monkeypatch.setattr(
-        "mini_vps.lifecycle.build_seed_iso", lambda s, pubkey, secrets=None: "/seed.iso"
+        "mini_vps.lifecycle.build_seed_iso",
+        lambda c, s, pubkey, secrets=None: "/seed.iso",
     )
     monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
     build_domain_xml_mock = MagicMock(return_value="<domain/>")
@@ -104,7 +106,9 @@ def test_provision_passes_secrets_to_build_seed_iso(monkeypatch):
 
     provision(conn, spec, secrets=secrets)
 
-    build_seed_mock.assert_called_once_with(spec, "ssh-ed25519 AAAA", secrets=secrets)
+    build_seed_mock.assert_called_once_with(
+        conn, spec, "ssh-ed25519 AAAA", secrets=secrets
+    )
 
 
 def test_provision_builds_seed_before_overlay(monkeypatch):
@@ -118,7 +122,7 @@ def test_provision_builds_seed_before_overlay(monkeypatch):
     )
     monkeypatch.setattr(
         "mini_vps.lifecycle.build_seed_iso",
-        lambda s, pubkey, secrets=None: call_order.append("seed") or "/seed.iso",
+        lambda c, s, pubkey, secrets=None: call_order.append("seed") or "/seed.iso",
     )
     monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
     monkeypatch.setattr(
@@ -212,7 +216,7 @@ def test_wait_for_ip_times_out_without_sleeping(monkeypatch):
 # --- teardown ---
 
 
-def test_teardown_destroys_and_undefines_active_domain(monkeypatch):
+def test_teardown_destroys_and_undefines_active_domain():
     conn = MagicMock()
     dom = MagicMock()
     dom.name.return_value = "web-1"
@@ -221,7 +225,6 @@ def test_teardown_destroys_and_undefines_active_domain(monkeypatch):
     conn.lookupByName.return_value = dom
     conn.listAllNWFilters.return_value = []
     conn.listAllStoragePools.return_value = []
-    monkeypatch.setattr("mini_vps.lifecycle.os.path.exists", lambda p: False)
 
     teardown(conn, {"name": "web-1"})
 
@@ -229,26 +232,24 @@ def test_teardown_destroys_and_undefines_active_domain(monkeypatch):
     dom.undefineFlags.assert_called_once_with(libvirt.VIR_DOMAIN_UNDEFINE_NVRAM)
 
 
-def test_teardown_skips_domain_when_absent(monkeypatch):
+def test_teardown_skips_domain_when_absent():
     conn = MagicMock()
     conn.listAllDomains.return_value = []
     conn.listAllNWFilters.return_value = []
     conn.listAllStoragePools.return_value = []
-    monkeypatch.setattr("mini_vps.lifecycle.os.path.exists", lambda p: False)
 
     teardown(conn, {"name": "web-1"})
 
     conn.lookupByName.assert_not_called()
 
 
-def test_teardown_undefines_nwfilter_when_present(monkeypatch):
+def test_teardown_undefines_nwfilter_when_present():
     conn = MagicMock()
     conn.listAllDomains.return_value = []
     nwfilter = MagicMock()
     nwfilter.name.return_value = "minivps-web-1"
     conn.listAllNWFilters.return_value = [nwfilter]
     conn.listAllStoragePools.return_value = []
-    monkeypatch.setattr("mini_vps.lifecycle.os.path.exists", lambda p: False)
 
     teardown(conn, {"name": "web-1"})
 
@@ -256,7 +257,7 @@ def test_teardown_undefines_nwfilter_when_present(monkeypatch):
     conn.nwfilterLookupByName.return_value.undefine.assert_called_once()
 
 
-def test_teardown_deletes_overlay_volume_when_present(monkeypatch):
+def test_teardown_deletes_overlay_volume_when_present():
     conn = MagicMock()
     conn.listAllDomains.return_value = []
     conn.listAllNWFilters.return_value = []
@@ -268,7 +269,6 @@ def test_teardown_deletes_overlay_volume_when_present(monkeypatch):
     vol = MagicMock()
     vol.name.return_value = "web-1.qcow2"
     pool.listAllVolumes.return_value = [vol]
-    monkeypatch.setattr("mini_vps.lifecycle.os.path.exists", lambda p: False)
 
     teardown(conn, {"name": "web-1"})
 
@@ -276,15 +276,31 @@ def test_teardown_deletes_overlay_volume_when_present(monkeypatch):
     pool.storageVolLookupByName.return_value.delete.assert_called_once_with(0)
 
 
-def test_teardown_removes_seed_iso_when_present(monkeypatch):
+def test_teardown_deletes_seed_volume_when_present():
+    conn = MagicMock()
+    conn.listAllDomains.return_value = []
+    conn.listAllNWFilters.return_value = []
+    pool_entry = MagicMock()
+    pool_entry.name.return_value = SEED_POOL_NAME
+    conn.listAllStoragePools.return_value = [pool_entry]
+    pool = MagicMock()
+    conn.storagePoolLookupByName.return_value = pool
+    vol = MagicMock()
+    vol.name.return_value = "web-1-seed.iso"
+    pool.listAllVolumes.return_value = [vol]
+
+    teardown(conn, {"name": "web-1"})
+
+    pool.storageVolLookupByName.assert_called_once_with("web-1-seed.iso")
+    pool.storageVolLookupByName.return_value.delete.assert_called_once_with(0)
+
+
+def test_teardown_skips_seed_delete_when_pool_absent():
     conn = MagicMock()
     conn.listAllDomains.return_value = []
     conn.listAllNWFilters.return_value = []
     conn.listAllStoragePools.return_value = []
-    monkeypatch.setattr("mini_vps.lifecycle.os.path.exists", lambda p: True)
-    remove_mock = MagicMock()
-    monkeypatch.setattr("mini_vps.lifecycle.os.remove", remove_mock)
 
     teardown(conn, {"name": "web-1"})
 
-    remove_mock.assert_called_once_with(f"{SEED_DIR}/web-1-seed.iso")
+    conn.storagePoolLookupByName.assert_not_called()

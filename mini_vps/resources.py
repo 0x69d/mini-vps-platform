@@ -17,13 +17,15 @@ from .config import (
     OVERLAY_VOL_XML_TEMPLATE,
     POOL_NAME,
     POOL_XML,
-    SEED_DIR,
+    SEED_POOL_NAME,
+    SEED_POOL_XML,
+    SEED_VOL_XML_TEMPLATE,
 )
 from .startup_scripts import render_startup_script
 
 
-def ensure_pool(conn, name) -> libvirt.virStoragePool:
-    """ストレージプールが無ければ作成し、アクティブ状態で返す(冪等)。
+def ensure_pool(conn, name, xml) -> libvirt.virStoragePool:
+    """ストレージプールが無ければ xml で作成し、アクティブ状態で返す(冪等)。
 
     define → build → create → autostart の順にセットアップする。
     """
@@ -33,11 +35,16 @@ def ensure_pool(conn, name) -> libvirt.virStoragePool:
         if not pool.isActive():
             pool.create(0)
         return pool
-    pool = conn.storagePoolDefineXML(POOL_XML, 0)
+    pool = conn.storagePoolDefineXML(xml, 0)
     pool.build(0)
     pool.create(0)
     pool.setAutostart(1)
     return pool
+
+
+def ensure_seed_pool(conn) -> libvirt.virStoragePool:
+    """Seed ISO 用の dir 型ストレージプールが無ければ作成し、アクティブ状態で返す。"""
+    return ensure_pool(conn, SEED_POOL_NAME, SEED_POOL_XML)
 
 
 def create_overlay_volume(conn, spec) -> str:
@@ -49,7 +56,7 @@ def create_overlay_volume(conn, spec) -> str:
     base_pool.refresh(0)
     base_path = base_pool.storageVolLookupByName(spec["base_image"]).path()
 
-    pool = ensure_pool(conn, POOL_NAME)
+    pool = ensure_pool(conn, POOL_NAME, POOL_XML)
     vol_name = f"{spec['name']}.qcow2"
 
     if vol_name in {v.name() for v in pool.listAllVolumes()}:
@@ -86,40 +93,55 @@ def _build_user_data(spec, pubkey, secrets: dict[str, str] | None) -> dict:
     return data
 
 
-def build_seed_iso(spec, pubkey, secrets: dict[str, str] | None = None) -> str:
-    """Seed ISO を生成してパスを返す。
+def build_seed_iso(conn, spec, pubkey, secrets: dict[str, str] | None = None) -> str:
+    """Seed ISO を生成し、seed 用ストレージプールに配置してそのパスを返す。
 
     user-data と meta-data を一時ファイルに書き出し、cloud-localds で
-    {name}-seed.iso を SEED_DIR に生成する。secrets はこの user-data 生成にのみ使う。
+    一時ディレクトリ内に {name}-seed.iso を生成したうえで、libvirt の volume API
+    (createXML + upload)で seed 用プールへ配置する。secrets はこの user-data
+    生成にのみ使う。
     """
     user_data = "#cloud-config\n" + yaml.safe_dump(
         _build_user_data(spec, pubkey, secrets), sort_keys=False
     )
     meta_data = META_DATA_TEMPLATE.format(name=spec["name"], hostname=spec["hostname"])
-    seed_path = f"{SEED_DIR}/{spec['name']}-seed.iso"
-
-    # libvirt driver は dynamic_ownership=1 が既定のため、一度でも起動した VM の
-    # seed ISO は起動時に libvirt-qemu:kvm へ chown され、実行ユーザーからは
-    # 上書き不可になる。cloud-localds は出力先へ直接書き込むため、生成前に
-    # 既存ファイルを削除しておく(teardown() の seed ISO 削除と同じ前提)。
-    if os.path.exists(seed_path):
-        os.remove(seed_path)
+    vol_name = f"{spec['name']}-seed.iso"
 
     # TemporaryDirectory で囲むことで、cloud-localds が失敗しても
     # with を抜ける際に一時ファイルが確実に削除される。
     with tempfile.TemporaryDirectory() as tmp_dir:
         ud_file_path = os.path.join(tmp_dir, "user-data")
         md_file_path = os.path.join(tmp_dir, "meta-data")
+        iso_path = os.path.join(tmp_dir, "seed.iso")
         with open(ud_file_path, "w", encoding="utf-8") as ud_file:
             ud_file.write(user_data)
         with open(md_file_path, "w", encoding="utf-8") as md_file:
             md_file.write(meta_data)
 
         subprocess.run(
-            ["cloud-localds", seed_path, ud_file_path, md_file_path], check=True
+            ["cloud-localds", iso_path, ud_file_path, md_file_path], check=True
         )
 
-    return seed_path
+        pool = ensure_seed_pool(conn)
+        if vol_name in {v.name() for v in pool.listAllVolumes()}:
+            pool.storageVolLookupByName(vol_name).delete(0)
+
+        capacity = os.path.getsize(iso_path)
+        vol = pool.createXML(
+            SEED_VOL_XML_TEMPLATE.format(name=vol_name, capacity_bytes=capacity), 0
+        )
+
+        stream = conn.newStream(0)
+        vol.upload(stream, 0, 0, 0)
+        try:
+            with open(iso_path, "rb") as iso_file:
+                stream.sendAll(lambda st, nbytes, f: f.read(nbytes), iso_file)
+        except Exception:
+            stream.abort()
+            raise
+        stream.finish()
+
+    return vol.path()
 
 
 def _filter_name(spec) -> str:

@@ -5,6 +5,7 @@ POOL_NAME = "vps-pool"
 POOL_PATH = "/var/lib/libvirt/vps-pool"
 BASE_POOL = "images"
 SEED_DIR = "/var/lib/libvirt/seeds"
+SEED_POOL_NAME = "vps-seeds"
 
 # 管理対象 domain の <metadata> に spec を埋め込むための名前空間。
 # URI は単なる一意識別子で、機能上は任意の文字列でよい(プレースホルダ)。
@@ -15,6 +16,15 @@ POOL_XML = f"""
   <name>{POOL_NAME}</name>
   <target>
     <path>{POOL_PATH}</path>
+  </target>
+</pool>
+"""
+
+SEED_POOL_XML = f"""
+<pool type='dir'>
+  <name>{SEED_POOL_NAME}</name>
+  <target>
+    <path>{SEED_DIR}</path>
   </target>
 </pool>
 """
@@ -30,6 +40,16 @@ OVERLAY_VOL_XML_TEMPLATE = """
     <path>{base_path}</path>
     <format type='qcow2'/>
   </backingStore>
+</volume>
+"""
+
+SEED_VOL_XML_TEMPLATE = """
+<volume>
+  <name>{name}</name>
+  <capacity unit='bytes'>{capacity_bytes}</capacity>
+  <target>
+    <format type='raw'/>
+  </target>
 </volume>
 """
 
