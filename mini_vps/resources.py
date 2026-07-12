@@ -71,7 +71,9 @@ def create_overlay_volume(conn, spec) -> str:
 def _build_user_data(spec, pubkey, secrets: dict[str, str] | None) -> dict:
     """cloud-config の dict(YAML 化前)を組み立てる。
 
-    hostname/users は常に含める。spec["startup_script"] が指定されていれば、
+    hostname/users/packages は常に含める。qemu-guest-agent は IP 取得
+    (SRC_AGENT)の観測手段として全 VM に導入する(同梱済みイメージでは
+    冪等な no-op)。spec["startup_script"] が指定されていれば、
     対応するテンプレートをレンダリングして write_files/runcmd を追加する。
     """
     data = {
@@ -84,6 +86,7 @@ def _build_user_data(spec, pubkey, secrets: dict[str, str] | None) -> dict:
                 "ssh_authorized_keys": [pubkey],
             }
         ],
+        "packages": ["qemu-guest-agent"],
     }
     startup_script = spec.get("startup_script")
     if startup_script:

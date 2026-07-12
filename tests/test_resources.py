@@ -115,6 +115,12 @@ def test_build_domain_xml_includes_rng_clock_pm_and_discard():
     assert "discard='unmap'" in xml
 
 
+def test_build_domain_xml_includes_guest_agent_channel():
+    xml = build_domain_xml(_spec(), "/overlay.qcow2", "/seed.iso")
+    assert "<channel type='unix'>" in xml
+    assert "name='org.qemu.guest_agent.0'" in xml
+
+
 def test_build_domain_xml_defaults_network_when_absent():
     spec = _spec()
     del spec["network"]
@@ -399,6 +405,24 @@ def test_build_seed_iso_omits_write_files_when_no_startup_script(monkeypatch):
     parsed = yaml.safe_load(captured["user_data"])
     assert "write_files" not in parsed
     assert "runcmd" not in parsed
+
+
+def test_build_seed_iso_includes_guest_agent_package(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, check):
+        captured["user_data"] = Path(cmd[2]).read_text()
+        _fake_run_writes_dummy_iso(cmd, check)
+
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
+    conn = MagicMock()
+    _seed_pool_mock(monkeypatch)
+
+    build_seed_iso(conn, _spec(name="web-1"), "ssh-ed25519 AAAA...")
+
+    parsed = yaml.safe_load(captured["user_data"])
+    # IP 取得(SRC_AGENT)のため qemu-guest-agent を全 VM に導入する
+    assert parsed["packages"] == ["qemu-guest-agent"]
 
 
 def test_build_seed_iso_includes_write_files_and_runcmd_when_startup_script_set(
