@@ -75,6 +75,7 @@ libvirt 接続・subprocess に依存する関数は `unittest.mock`(`MagicMock`
 
 `libvirtd`(`qemu:///system`)、base image ストレージプール `images`、`cloud-localds` バイナリ、
 ebtables/iptables/arptables(nwfilter 用)、`~/.ssh/minivps_ed25519.pub`(cloud-init 用)、
-OVMF/edk2-ovmf(UEFI firmware 自動選択用)。
+OVMF/edk2-ovmf(UEFI firmware 自動選択用)、Open vSwitch + dnsmasq
+(OVS セグメント `seg1`〜`seg3` のブリッジ・DHCP 用)。
 これらのホスト事前設定は `ansible/playbook.yml` で自動化している(`README.md` 参照)。
 `libvirt-python` は sdist ビルドに libvirt 開発ヘッダ(`libvirt-dev` 等)を要する。
