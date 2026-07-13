@@ -16,18 +16,20 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 ### 含むもの（最小構成）
 
 - `Server` リソース: YAML / JSON 定義から libvirt domain を生成・起動・停止・削除する。
-- NAT ネットワーク: libvirt の仮想ブリッジ経由でゲストを外向き通信させる。
-- セグメント分離: 複数の独立 NAT ネットワークで VM を隔離する。
+- NAT ネットワーク: ゲストをホストの NAT 経由で外向き通信させる。
+- セグメント分離: 単一の OVS 統合ブリッジ + セグメントごとの VLAN タグで VM を隔離する
+  (`default` のみ従来どおり libvirt NAT ネットワーク)。
 - パケットフィルタ: `filters` で宣言した inbound ポートのみ許可する
   (作成後に `vm-spec.yaml` を編集して再度 `create`/`PUT` することで変更できる)。
 - 監視: Prometheus + Grafana によってメトリクスを可視化する。
 
 ### 含まないもの
 
-- 複数物理ホストへのスケジューリング。
+- 複数物理ホストへのスケジューリングやホスト間トンネル(VXLAN 等)。
 - マルチテナンシー、課金、認証などの大規模運用機構。
 - パケットフィルタの IPv6・egress・稼働中 VM へのライブ反映(ルール変更は停止中の VM に
-  限り inbound・IPv4 のみ対応、反映は次回起動時から)。
+  限り inbound・IPv4 のみ対応、反映は次回起動時から)。OVS セグメント上の VM への
+  パケットフィルタ。
 - アラート通知(Alertmanager 等)。
 
 ## アーキテクチャ
@@ -37,7 +39,9 @@ spec.yaml / spec.json  →  parse  →  内部データ構造  →  XML 生成  
 ```
 
 - **入力**: YAML / JSON。domain XML は手書きせず、変換層で生成する。
-- **ネットワーク**: NAT。ゲストはセグメントごとに独立した仮想ブリッジに接続し、ホストの NAT 経由で外に出る。
+- **ネットワーク**: NAT。`seg1`〜`seg3` のゲストは単一の OVS 統合ブリッジに VLAN タグ付きで
+  接続し(L2 分離)、ホストのゲートウェイ + NAT 経由で外に出る。`default` のゲストは
+  従来どおり libvirt NAT ネットワーク(virbr0)に接続する。
 - **実体**: 各 VM は libvirt domain に対応する。
 
 ## 最小 YAML スキーマ
@@ -60,7 +64,7 @@ disk: 10                      # GB
 | `hostname` | str（`name` と同じ文字種制約） | 任意 | 未指定なら `name` で補完 |
 | `user` | str（小文字・数字・`-`・`_`、先頭は小文字かアンダースコア、32文字以内） | 任意 | `ubuntu` |
 | `network` | str（`name` と同じ文字種制約）。Ansible で事前定義済みのネットワーク名(`default`・`seg1`〜`seg3`)を指定する。未定義名を指定すると作成時に libvirt エラーになる | 任意 | `default` |
-| `filters` | list[FilterRule] \| null | 任意 | 未指定(null)なら全 inbound 許可。`[]` を明示すると全 inbound 拒否 |
+| `filters` | list[FilterRule] \| null | 任意 | 未指定(null)なら全 inbound 許可。`[]` を明示すると全 inbound 拒否。OVS セグメント(`seg1`〜`seg3`)との併用は拒否される(CLI 終了コード 6 / API 422) |
 | `startup_script` | str \| null | 任意 | 未指定(null)。指定する場合は既知のテンプレート名のみ許可([docs/startup-scripts.md](docs/startup-scripts.md) 参照) |
 
 `FilterRule`: `{port: int(1-65535), protocol: "tcp" \| "udp"}` の inbound 許可ルール1件。
@@ -68,25 +72,41 @@ disk: 10                      # GB
 > **警告**: `filters` を1件でも宣言すると、明示したポート以外の inbound は SSH(22番)を含めて
 > すべて拒否される。SSH アクセスを維持したい場合は `{port: 22, protocol: "tcp"}` を
 > 自分で `filters` に含める必要がある(暗黙の許可は無い)。
+>
+> また `filters` は libvirt nwfilter(ebtables/Linux ブリッジ前提)で実装されているため、
+> OVS ブリッジ接続のセグメント(`seg1`〜`seg3`)では機能しない。素通しの VM を黙って
+> 作らないよう、この組み合わせは fail-loud に拒否される(CLI 終了コード 6 / API 422)。
 
 ## ネットワークセグメント
 
-VM を互いに隔離するための独立 NAT ネットワーク。Ansible playbook が以下を事前定義する
+VM を互いに隔離するための配置先。`seg1`〜`seg3` は単一の OVS 統合ブリッジ
+`ovs-segments` 上の VLAN として実現し、Ansible playbook が以下を事前定義する
 (定義は `ansible/vars/network_segments.yml`)。セグメントのサブネットは
-「192.168.(200+セグメント番号).0/24」の規則で、名前から即座に読み取れる。
+「192.168.(200+セグメント番号).0/24」、VLAN ID はサブネットの第3オクテットと
+同値の規則で、名前から即座に読み取れる。
 
-| name | bridge | サブネット | DHCP レンジ |
-|---|---|---|---|
-| `default` | virbr0 | 192.168.122.0/24 | .2〜.254 |
-| `seg1` | virbr-seg1 | 192.168.201.0/24 | .2〜.254 |
-| `seg2` | virbr-seg2 | 192.168.202.0/24 | .2〜.254 |
-| `seg3` | virbr-seg3 | 192.168.203.0/24 | .2〜.254 |
+| name | 接続先 | VLAN ID | GW ポート | サブネット | DHCP レンジ |
+|---|---|---|---|---|---|
+| `default` | virbr0(libvirt NAT) | - | - | 192.168.122.0/24 | .2〜.254 |
+| `seg1` | ovs-segments | 201 | seg1-gw | 192.168.201.0/24 | .2〜.254 |
+| `seg2` | ovs-segments | 202 | seg2-gw | 192.168.202.0/24 | .2〜.254 |
+| `seg3` | ovs-segments | 203 | seg3-gw | 192.168.203.0/24 | .2〜.254 |
 
-`default` とセグメントの違いは管理元と役割のみ。`default` はディストリ同梱 XML から
-定義される libvirt 標準ネットワークで、spec で `network` 未指定時の受け皿(汎用)。
-`seg1`〜`seg3` は本プロジェクトが vars で管理する、分離を明示的に意図した配置先。
-遮断の機構は共通で、`default` も各セグメントから見れば相互遮断されたネットワークの
-1つとして振る舞う。
+`default` はディストリ同梱 XML から定義される libvirt 標準の NAT ネットワークで、
+spec で `network` 未指定時の受け皿(汎用)。DHCP/DNS/NAT は libvirt が面倒を見る。
+
+`seg1`〜`seg3` の libvirt ネットワークは bridge-mode(`<forward mode='bridge'/>` +
+`<virtualport type='openvswitch'/>` + ネットワークレベルの `<vlan>`)で定義される
+名前解決の薄いシムで、VM の `<interface type='network'>` はこれを参照するだけで
+VLAN タグ付きの OVS ポートに接続される。bridge-mode ネットワークは libvirt の
+dnsmasq/NAT を持てないため、L3 機能はホスト側の2つの systemd ユニットが提供する:
+
+- **`minivps-ovs-net.service`**(oneshot): `ovs-segments` ブリッジ・セグメントごとの
+  VLAN タグ付き internal port(`segN-gw`)とゲートウェイ IP・`ip_forward`・
+  OpenFlow ACL(セグメント間・セグメント↔default 間の遮断)・iptables(`MINIVPS_NAT`
+  チェーンで MASQUERADE)を、起動のたびに冪等に再構成する。
+- **`minivps-dnsmasq.service`**: `segN-gw` に bind した dnsmasq が DHCP/DNS を提供する
+  (リースは `/var/lib/minivps/dnsmasq.leases`)。
 
 VM の所属セグメントは spec の `network` で指定する。
 
@@ -102,16 +122,18 @@ network: seg1
 **ポリシー**: 同一セグメント内の VM は自由に通信できる。セグメント間は相互遮断され、
 各セグメントから外向き(インターネット方向)の通信は NAT 経由で許可される。
 
-この遮断に追加のファイアウォール設定は不要である。libvirt は NAT ネットワークの起動時に
-ネットワーク単位の FORWARD ルール(iptables backend では `LIBVIRT_FWI`/`LIBVIRT_FWO`
-チェーン)を自動投入し、別ブリッジ宛の新規パケットは宛先ネットワーク側の REJECT に当たる
-ため、独立 NAT ネットワークに分けた時点でセグメント間通信は遮断される。
+遮断は `ovs-segments` ブリッジ自身の OpenFlow ACL(`ovs-segments.flows.j2` が生成)で
+完結し、iptables の FORWARD チェーンには依存しない。セグメント→他セグメント/`default`
+はサブネットの組で静的に drop し、ホスト経由で `segN-gw` へ流入する方向は conntrack
+判定(戻り通信とホスト発の接続のみ許可)で塞ぐ。なお OpenFlow には `REJECT` 相当が
+無いため、遮断されたクライアントは即時拒否ではなくタイムアウトを見る。実装の詳細は
+`ansible/templates/ovs-segments.flows.j2` のコメントを参照。
 
-> **注意**: ホスト側で FORWARD チェーンの `LIBVIRT_*` より前に広範な ACCEPT ルールを
-> 手動追加すると、この遮断は崩れる。
+**制約**: VM の IP は qemu-guest-agent 経由で観測するため、`status` の `ip` が確定する
+のはゲストの agent 起動後になる([docs/guest-os.md](docs/guest-os.md) 参照)。
 
 セグメントを追加する場合は `ansible/vars/network_segments.yml` に1エントリ追記して
-playbook を再実行する(サブネットとブリッジ名は既存と重複させないこと)。
+playbook を再実行する(サブネット・VLAN ID・`gw_port` は既存と重複させないこと)。
 
 ## スタートアップスクリプト
 
@@ -138,7 +160,8 @@ secrets の渡し方・トラブルシューティングは [docs/startup-script
 ### 1. ホスト側の事前設定(Ansible)
 
 パッケージ導入(apt/dnf)・libvirtd の起動と自動起動・実行ユーザーの `libvirt`
-グループ追加・default ネットワーク・セグメント NAT ネットワーク(`seg1`〜`seg3`)・
+グループ追加・OVS セグメント基盤(`ovs-segments` ブリッジ・ゲートウェイ・DHCP・NAT)・
+default ネットワーク・セグメント OVS ネットワーク(`seg1`〜`seg3`)・
 `images` ストレージプール・base image・seed ISO 置き場(`/var/lib/libvirt/seeds`)・
 SSH 鍵まで、Ansible playbook で一括セットアップする。
 
@@ -221,7 +244,8 @@ uv run mini-vps delete web-1
 収束させる(それ以外のフィールドの差分は spec 相違として終了コード 3
 (`ServerConflict`)で拒否する)。収束はドメイン停止中の VM のみ許可し、
 稼働中に実行すると終了コード 5(`ServerRunning`)で拒否する(先に `stop` してから
-再実行する)。
+再実行する)。OVS セグメントと `filters` の併用は終了コード 6
+(`FiltersUnsupported`)で拒否する。
 
 ### 4. Web API(JSON)
 
@@ -255,7 +279,8 @@ JSON body に `{"force": true}` を渡し、状態変化は `GET /servers/{name}
 拒否され、API では 409(`ServerNotRunning`)で返る。
 
 収束の挙動は CLI の `create`(上記参照)と同じ。API では `ServerConflict`・
-`ServerRunning` のどちらも 409 で返る。
+`ServerRunning` のどちらも 409 で返る。OVS セグメントと `filters` の併用は
+422(`FiltersUnsupported`)で返る。
 
 ### 5. Prometheus エクスポーター
 

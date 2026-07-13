@@ -71,7 +71,9 @@ def create_overlay_volume(conn, spec) -> str:
 def _build_user_data(spec, pubkey, secrets: dict[str, str] | None) -> dict:
     """cloud-config の dict(YAML 化前)を組み立てる。
 
-    hostname/users は常に含める。spec["startup_script"] が指定されていれば、
+    hostname/users/packages は常に含める。qemu-guest-agent は IP 取得
+    (SRC_AGENT)の観測手段として全 VM に導入する(同梱済みイメージでは
+    冪等な no-op)。spec["startup_script"] が指定されていれば、
     対応するテンプレートをレンダリングして write_files/runcmd を追加する。
     """
     data = {
@@ -84,6 +86,7 @@ def _build_user_data(spec, pubkey, secrets: dict[str, str] | None) -> dict:
                 "ssh_authorized_keys": [pubkey],
             }
         ],
+        "packages": ["qemu-guest-agent"],
     }
     startup_script = spec.get("startup_script")
     if startup_script:
@@ -159,6 +162,16 @@ def build_nwfilter_xml(spec) -> str:
         for f in spec["filters"]
     )
     return NWFILTER_XML_TEMPLATE.format(name=_filter_name(spec), port_rules=port_rules)
+
+
+def is_ovs_network_xml(xml_text: str) -> bool:
+    """ネットワーク XML が OVS ブリッジ接続かを判定する外部依存ゼロの純粋関数。
+
+    libvirt が OVS 接続のネットワーク定義に要求する
+    <virtualport type='openvswitch'/> の有無で判定する。
+    """
+    el = ET.fromstring(xml_text).find("virtualport")
+    return el is not None and el.get("type") == "openvswitch"
 
 
 def build_domain_xml(spec, overlay_path, seed_path, filter_name=None) -> str:

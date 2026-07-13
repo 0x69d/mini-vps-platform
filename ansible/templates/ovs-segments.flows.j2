@@ -1,0 +1,50 @@
+{# mini-vps: ovs-segments ブリッジのOpenFlow ACL(Ansibleが生成)。 #}
+{# minivps-ovs-net.sh.j2 から `ovs-ofctl --bundle replace-flows` で毎回アトミックに全置換される。 #}
+{# iptables の FORWARD チェーン(Docker/libvirtdと位置取りを競合する)に一切依存せず、 #}
+{# OVS自身のフローテーブル内でセグメント間・セグメント↔default間の遮断を完結させる。 #}
+{#                                                                                     #}
+{# mechanism 1: セグメント間・セグメント→default(table 0、静的drop)。                  #}
+{# 送信元サブネット(nw_src)と宛先サブネット(nw_dst)の組で判定する。VLANタグ         #}
+{# (dl_vlan)は access port の tag= 設定が NORMAL アクション(内蔵L2学習スイッチ)     #}
+{# 自身のVLANメンバーシップ判定にのみ使われ、ワイヤー上に実タグが乗らない限り        #}
+{# 明示的なOpenFlowルールのdl_vlanマッチには反映されない(ofproto/traceでの実機      #}
+{# 検証で確認済み)。そのためVLANタグではなくIPヘッダのnw_src/nw_dstで判定する。     #}
+{# VMのポート増減(VM作成/削除)と無関係にACLを維持できる点は変わらない。他ネットワーク #}
+{# 宛てのフレームはゲートウェイポートへ配送される前にOVS内部で破棄され、ホストのIP   #}
+{# スタック(netfilter FORWARD)に一切到達しない。                                    #}
+{% for src in network_segments %}
+{% for dst in network_segments %}
+{% if src.name != dst.name %}
+table=0,priority=300,ip,nw_src={{ src.subnet }},nw_dst={{ dst.subnet }},actions=drop
+{% endif %}
+{% endfor %}
+table=0,priority=300,ip,nw_src={{ src.subnet }},nw_dst={{ default_network_subnet }},actions=drop
+{% endfor %}
+{#                                                                                     #}
+{# mechanism 2: gwポート経由の流入(table 0→1、ct()判定)。                            #}
+{# ホストがルーティングしてgwポートへ出力するパケットは、OVSからはin_port=gwポート   #}
+{# へのINGRESSとして観測される。ここでは「正当なインターネット戻りパケット」と       #}
+{# 「defaultからの新規流入」を宛先IPだけでは区別できないため、conntrack状態          #}
+{# (ESTABLISHED/RELATED)による判定へ回す。                                           #}
+{% for segment in network_segments %}
+table=0,priority=200,ip,in_port={{ segment.gw_port }},actions=ct(table=1)
+{% endfor %}
+{#                                                                                     #}
+{# table 0 の最終フォールバック。1本でもフローを入れるとOpenFlowのtable-miss既定動作 #}
+{# (drop)が有効になるため、ARP・同一セグメント内L2スイッチング・セグメント→          #}
+{# インターネットの正常系を守るために明示的なNORMALが必須。                          #}
+table=0,priority=0,actions=NORMAL
+{#                                                                                     #}
+{# table 1: ct()判定後の許可/拒否。                                                    #}
+{# ct_mark=1 は、ホスト自身が発信した接続(mangle/OUTPUTフックで minivps-ovs-net.sh.j2 #}
+{# が事前にCONNMARKでマーキング済み)を表す。OUTPUTフックは「ホストが自ら発信した     #}
+{# パケット」しか通らないため、default/他セグメントからの転送パケットが偽装         #}
+{# (MASQUERADE等)でこのマークを詐称することはできない。dnsmasq の DHCP/DNS 応答・ #}
+{# ゲートウェイ宛ping への応答・オペレータがホストから直接 VM へ張る接続を、        #}
+{# L4ポートを問わず一様に許可できる。既存の接続(ESTABLISHED/RELATED)はそれとは     #}
+{# 別に許可し、それ以外(defaultからの新規接続)はdropする(他セグメント発は          #}
+{# mechanism 1 が ingress 時点でdrop済みのため、ここに届くのは多層防御)。            #}
+table=1,priority=210,ct_mark=1,actions=NORMAL
+table=1,priority=200,ct_state=+trk+est,actions=NORMAL
+table=1,priority=200,ct_state=+trk+rel,actions=NORMAL
+table=1,priority=0,actions=drop

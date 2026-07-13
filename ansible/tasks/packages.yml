@@ -15,6 +15,11 @@
       - iptables
       - arptables
       - ovmf
+      - openvswitch-switch
+      # フルの dnsmasq はインストール時に 0.0.0.0:53 で自動起動し
+      # systemd-resolved と衝突するため、デーモン登録の無い dnsmasq-base
+      # (libvirt 自身も利用)を使う。
+      - dnsmasq-base
     state: present
     update_cache: true
   when: ansible_facts['os_family'] == 'Debian'
@@ -36,5 +41,9 @@
       - iptables
       - arptables
       - edk2-ovmf
+      - openvswitch
+      # RedHat 系の dnsmasq はサービスが自動有効化されないため
+      # そのまま導入する(専用ユニット minivps-dnsmasq.service から起動する)。
+      - dnsmasq
     state: present
   when: ansible_facts['os_family'] == 'RedHat'

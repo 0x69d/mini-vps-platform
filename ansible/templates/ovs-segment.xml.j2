@@ -1,0 +1,9 @@
+<network>
+  <name>{{ segment.name }}</name>
+  <forward mode='bridge'/>
+  <bridge name='{{ ovs_bridge }}'/>
+  <virtualport type='openvswitch'/>
+  <vlan>
+    <tag id='{{ segment.vlan_id }}'/>
+  </vlan>
+</network>

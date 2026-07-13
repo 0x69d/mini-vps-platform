@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from mini_vps import cli
+from mini_vps.lifecycle import FiltersUnsupported
 from mini_vps.manager import (
     ServerConflict,
     ServerNotFound,
@@ -245,6 +246,21 @@ def test_create_returns_exit_code_5_when_running(mock_manager, tmp_path):
     )
 
     assert exit_code == 5
+
+
+def test_create_returns_exit_code_6_when_filters_unsupported(mock_manager, tmp_path):
+    """OVS 接続ネットワークと filters の併用は終了コード 6 で拒否される。"""
+    mock_manager.create.side_effect = FiltersUnsupported(
+        "filters cannot be enforced on OVS network: seg1"
+    )
+    spec_file = tmp_path / "vm.yaml"
+    spec_file.write_text(SPEC_YAML)
+
+    exit_code = cli.main(
+        ["create", str(spec_file)], manager_factory=_factory(mock_manager)
+    )
+
+    assert exit_code == 6
 
 
 def test_create_returns_exit_code_1_when_file_missing(mock_manager, tmp_path):

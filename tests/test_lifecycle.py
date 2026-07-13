@@ -2,15 +2,26 @@ from unittest.mock import MagicMock
 
 import libvirt
 import pytest
+from conftest import make_libvirt_error
 
 from mini_vps.config import POOL_NAME, SEED_POOL_NAME
 from mini_vps.lifecycle import (
+    FiltersUnsupported,
+    _agent_ipv4,
+    _first_ipv4,
     _lease_ipv4,
+    ensure_filters_enforceable,
     ensure_network_active,
+    get_domain_ipv4,
+    is_ovs_network,
     provision,
     teardown,
     wait_for_ip,
 )
+
+# libvirt ネットワーク XML の最小フィクスチャ(OVS 判定に必要な要素のみ)。
+_OVS_NET_XML = "<network><virtualport type='openvswitch'/></network>"
+_NAT_NET_XML = "<network><forward mode='nat'/></network>"
 
 # --- ensure_network_active ---
 
@@ -37,11 +48,76 @@ def test_ensure_network_active_skips_when_already_active():
     net.create.assert_not_called()
 
 
+# --- is_ovs_network / ensure_filters_enforceable ---
+
+
+def test_is_ovs_network_looks_up_by_name():
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _OVS_NET_XML
+
+    assert is_ovs_network(conn, "seg1") is True
+    conn.networkLookupByName.assert_called_once_with("seg1")
+
+
+def test_ensure_filters_enforceable_noop_without_filters():
+    conn = MagicMock()
+
+    ensure_filters_enforceable(conn, {"name": "web-1", "network": "seg1"})
+
+    conn.networkLookupByName.assert_not_called()
+
+
+def test_ensure_filters_enforceable_rejects_filters_on_ovs_network():
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _OVS_NET_XML
+    spec = {
+        "name": "web-1",
+        "network": "seg1",
+        "filters": [{"port": 22, "protocol": "tcp"}],
+    }
+
+    with pytest.raises(FiltersUnsupported):
+        ensure_filters_enforceable(conn, spec)
+
+
+def test_ensure_filters_enforceable_rejects_empty_filters_on_ovs_network():
+    """filters=[] は「全 inbound 拒否」という有効な指定のため検証対象に含める。"""
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _OVS_NET_XML
+
+    with pytest.raises(FiltersUnsupported):
+        ensure_filters_enforceable(
+            conn, {"name": "web-1", "network": "seg1", "filters": []}
+        )
+
+
+def test_ensure_filters_enforceable_allows_filters_on_nat_network():
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _NAT_NET_XML
+    spec = {
+        "name": "web-1",
+        "network": "seg1",
+        "filters": [{"port": 22, "protocol": "tcp"}],
+    }
+
+    ensure_filters_enforceable(conn, spec)
+
+
+def test_ensure_filters_enforceable_defaults_to_default_network():
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _NAT_NET_XML
+
+    ensure_filters_enforceable(conn, {"name": "web-1", "filters": []})
+
+    conn.networkLookupByName.assert_called_once_with("default")
+
+
 # --- provision ---
 
 
 def test_provision_defines_nwfilter_when_filters_present(monkeypatch):
     conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _NAT_NET_XML
     spec = {"name": "web-1", "filters": [{"port": 22, "protocol": "tcp"}]}
     monkeypatch.setattr("mini_vps.lifecycle.ensure_network_active", MagicMock())
     monkeypatch.setattr("mini_vps.lifecycle.build_nwfilter_xml", lambda s: "<filter/>")
@@ -136,6 +212,158 @@ def test_provision_builds_seed_before_overlay(monkeypatch):
     assert call_order == ["seed", "overlay"]
 
 
+def test_provision_rejects_filters_on_ovs_network_before_creating_resources(
+    monkeypatch,
+):
+    conn = MagicMock()
+    conn.networkLookupByName.return_value.XMLDesc.return_value = _OVS_NET_XML
+    spec = {"name": "web-1", "network": "seg1", "filters": []}
+    build_seed_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.lifecycle.build_seed_iso", build_seed_mock)
+    overlay_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.lifecycle.create_overlay_volume", overlay_mock)
+    monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
+
+    with pytest.raises(FiltersUnsupported):
+        provision(conn, spec)
+
+    conn.nwfilterDefineXML.assert_not_called()
+    build_seed_mock.assert_not_called()
+    overlay_mock.assert_not_called()
+
+
+# --- _first_ipv4 ---
+
+
+@pytest.mark.parametrize(
+    ("ifaces", "expected"),
+    [
+        # loopback インターフェースは名前で除外する
+        (
+            {
+                "lo": {
+                    "addrs": [
+                        {"type": libvirt.VIR_IP_ADDR_TYPE_IPV4, "addr": "127.0.0.1"}
+                    ]
+                }
+            },
+            None,
+        ),
+        # lo を飛ばして実インターフェースの IPv4 を返す
+        (
+            {
+                "lo": {
+                    "addrs": [
+                        {"type": libvirt.VIR_IP_ADDR_TYPE_IPV4, "addr": "127.0.0.1"}
+                    ]
+                },
+                "ens3": {
+                    "addrs": [
+                        {
+                            "type": libvirt.VIR_IP_ADDR_TYPE_IPV4,
+                            "addr": "192.168.201.10",
+                        }
+                    ]
+                },
+            },
+            "192.168.201.10",
+        ),
+        # 名前が lo でなくても 127.0.0.0/8 のアドレスは除外する
+        (
+            {
+                "dummy0": {
+                    "addrs": [
+                        {"type": libvirt.VIR_IP_ADDR_TYPE_IPV4, "addr": "127.0.1.1"}
+                    ]
+                }
+            },
+            None,
+        ),
+        # SRC_AGENT は addrs が None のインターフェースを返しうる
+        ({"ens3": {"addrs": None}}, None),
+        (
+            {
+                "ens3": {
+                    "addrs": [
+                        {"type": libvirt.VIR_IP_ADDR_TYPE_IPV6, "addr": "fe80::1"}
+                    ]
+                }
+            },
+            None,
+        ),
+    ],
+)
+def test_first_ipv4_skips_loopback_and_non_ipv4(ifaces, expected):
+    assert _first_ipv4(ifaces) == expected
+
+
+# --- _agent_ipv4 ---
+
+
+def test_agent_ipv4_queries_agent_source():
+    dom = MagicMock()
+    dom.interfaceAddresses.return_value = {
+        "ens3": {"addrs": [{"type": libvirt.VIR_IP_ADDR_TYPE_IPV4, "addr": "10.0.0.5"}]}
+    }
+
+    assert _agent_ipv4(dom) == "10.0.0.5"
+    dom.interfaceAddresses.assert_called_once_with(
+        libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT
+    )
+
+
+def test_agent_ipv4_returns_none_when_agent_unavailable():
+    dom = MagicMock()
+    dom.interfaceAddresses.side_effect = make_libvirt_error(
+        libvirt.VIR_ERR_AGENT_UNRESPONSIVE
+    )
+
+    assert _agent_ipv4(dom) is None
+
+
+# --- get_domain_ipv4 ---
+
+
+def test_get_domain_ipv4_prefers_agent(monkeypatch):
+    dom = MagicMock()
+    monkeypatch.setattr(
+        "mini_vps.lifecycle._agent_ipv4", MagicMock(return_value="10.0.0.5")
+    )
+    lease_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.lifecycle._lease_ipv4", lease_mock)
+
+    assert get_domain_ipv4(dom) == "10.0.0.5"
+    lease_mock.assert_not_called()
+
+
+def test_get_domain_ipv4_falls_back_to_lease_when_agent_fails():
+    """agent 未接続(libvirtError)でもリース経路で IP が取れることを検証する。"""
+    dom = MagicMock()
+
+    def fake_interface_addresses(source):
+        if source == libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT:
+            raise make_libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
+        return {
+            "vnet0": {
+                "addrs": [{"type": libvirt.VIR_IP_ADDR_TYPE_IPV4, "addr": "10.0.0.9"}]
+            }
+        }
+
+    dom.interfaceAddresses.side_effect = fake_interface_addresses
+
+    assert get_domain_ipv4(dom) == "10.0.0.9"
+
+
+def test_get_domain_ipv4_falls_back_to_lease_when_agent_has_no_ip(monkeypatch):
+    dom = MagicMock()
+    monkeypatch.setattr("mini_vps.lifecycle._agent_ipv4", MagicMock(return_value=None))
+    monkeypatch.setattr(
+        "mini_vps.lifecycle._lease_ipv4", MagicMock(return_value="10.0.0.9")
+    )
+
+    assert get_domain_ipv4(dom) == "10.0.0.9"
+
+
 # --- _lease_ipv4 ---
 
 
@@ -192,7 +420,7 @@ def test_lease_ipv4_extracts_first_ipv4(ifaces, expected):
 def test_wait_for_ip_returns_once_available(monkeypatch):
     dom = MagicMock()
     monkeypatch.setattr(
-        "mini_vps.lifecycle._lease_ipv4",
+        "mini_vps.lifecycle.get_domain_ipv4",
         MagicMock(side_effect=[None, None, "10.0.0.5"]),
     )
     sleep_mock = MagicMock()
@@ -204,7 +432,9 @@ def test_wait_for_ip_returns_once_available(monkeypatch):
 
 def test_wait_for_ip_times_out_without_sleeping(monkeypatch):
     dom = MagicMock()
-    monkeypatch.setattr("mini_vps.lifecycle._lease_ipv4", MagicMock(return_value=None))
+    monkeypatch.setattr(
+        "mini_vps.lifecycle.get_domain_ipv4", MagicMock(return_value=None)
+    )
     sleep_mock = MagicMock()
     monkeypatch.setattr("mini_vps.lifecycle.time.sleep", sleep_mock)
 

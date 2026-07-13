@@ -94,6 +94,9 @@ DOMAIN_XML_TEMPLATE = """
       <model type='virtio'/>
       {filterref}
     </interface>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
     <rng model='virtio'>
       <backend model='random'>/dev/urandom</backend>
     </rng>

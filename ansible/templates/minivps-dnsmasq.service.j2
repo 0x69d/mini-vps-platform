@@ -1,0 +1,14 @@
+# mini-vps: OVS セグメント用 DHCP/DNS ユニット(Ansible が生成)
+[Unit]
+Description=mini-vps segment DHCP/DNS (dnsmasq)
+# bind-interfaces はゲートウェイポートに IP が付いた後でないと失敗するため、
+# minivps-ovs-net.service の完了を必須とする
+After=minivps-ovs-net.service
+Requires=minivps-ovs-net.service
+
+[Service]
+ExecStart=/usr/sbin/dnsmasq -k --conf-file=/etc/minivps/dnsmasq.conf
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

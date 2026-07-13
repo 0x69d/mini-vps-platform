@@ -1,27 +1,37 @@
-# VM セグメント用の独立 NAT ネットワーク定義(tasks/segment_network.yml が参照)。
+# VM セグメントのネットワーク定義(tasks/ovs.yml・tasks/segment_network.yml が参照)。
+# 方式: 単一の OVS 統合ブリッジ(ovs_bridge)上でセグメントごとに VLAN タグを
+# 割り当てて L2 分離する。libvirt ネットワーク(bridge-mode)は名前解決の
+# 薄いシムで、ゲートウェイ/DHCP/NAT はホスト側(tasks/ovs.yml)が提供する。
 # ポリシー: セグメント間は相互遮断、各セグメントから外向き NAT は許可。
-# サブネットは「192.168.(200+セグメント番号).0/24」の規則で採番する
-# (default の 192.168.122.0/24 や一般的な家庭用レンジとの衝突を避ける)。
+# サブネットは「192.168.(200+セグメント番号).0/24」、VLAN ID はサブネットの
+# 第3オクテットと同値で採番する(default の 192.168.122.0/24 や一般的な
+# 家庭用レンジとの衝突を避ける)。
 # default ネットワーク(virbr0 / 192.168.122.0/24)はここに含めず、
 # tasks/network.yml(ディストリ同梱 XML)で従来どおり管理する。
 # 制約: name は VM spec の network フィールドの文字種制約(英数字始まり・
-# 英数字/ハイフン/アンダースコア・63文字以内)、bridge は 15 文字以内(IFNAMSIZ)。
+# 英数字/ハイフン/アンダースコア・63文字以内)、gw_port は 15 文字以内
+# (IFNAMSIZ)、vlan_id は 1〜4094。
+ovs_bridge: ovs-segments
+default_network_subnet: 192.168.122.0/24
 network_segments:
   - name: seg1
-    bridge: virbr-seg1
+    vlan_id: 201
+    gw_port: seg1-gw
+    subnet: 192.168.201.0/24
     gateway: 192.168.201.1
-    netmask: 255.255.255.0
     dhcp_start: 192.168.201.2
     dhcp_end: 192.168.201.254
   - name: seg2
-    bridge: virbr-seg2
+    vlan_id: 202
+    gw_port: seg2-gw
+    subnet: 192.168.202.0/24
     gateway: 192.168.202.1
-    netmask: 255.255.255.0
     dhcp_start: 192.168.202.2
     dhcp_end: 192.168.202.254
   - name: seg3
-    bridge: virbr-seg3
+    vlan_id: 203
+    gw_port: seg3-gw
+    subnet: 192.168.203.0/24
     gateway: 192.168.203.1
-    netmask: 255.255.255.0
     dhcp_start: 192.168.203.2
     dhcp_end: 192.168.203.254

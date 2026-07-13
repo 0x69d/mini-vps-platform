@@ -1,0 +1,18 @@
+# mini-vps: OVS セグメント基盤の構成ユニット(Ansible が生成)
+[Unit]
+Description=mini-vps OVS segment network (bridge, gateway IPs, NAT)
+# Debian 系は openvswitch-switch.service、RedHat 系は openvswitch.service。
+# 存在しないユニット名の After/Wants は無害に無視される。
+After=openvswitch-switch.service openvswitch.service network-pre.target
+Wants=openvswitch-switch.service openvswitch.service
+# libvirt ネットワーク(seg1〜3)の autostart がブリッジ実在を前提にできるよう、
+# 両 OS のデーモン構成(モノリシック/モジュラー)より先に実行する
+Before=libvirtd.service virtqemud.service virtnetworkd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/minivps-ovs-net.sh
+
+[Install]
+WantedBy=multi-user.target

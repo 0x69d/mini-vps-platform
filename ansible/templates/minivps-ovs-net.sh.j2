@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# mini-vps: OVS セグメント基盤の構成スクリプト(Ansible が生成)。
+# minivps-ovs-net.service(systemd oneshot)から起動のたびに実行される。
+# ブリッジ/ポートは OVSDB が再起動を跨いで保持するが、ゲートウェイ IP・
+# OpenFlow ルール(ovs-vswitchd の実行時状態、OVSDB非管理)・iptables ルールは
+# いずれも揮発するため、全行を冪等に書いて毎回再構成する。
+set -euo pipefail
+
+# 1) OVS 統合ブリッジとセグメントごとのゲートウェイ用 internal port
+#    (DB 初期化に備えて --may-exist で毎回保証する)
+ovs-vsctl --may-exist add-br {{ ovs_bridge }}
+# OpenFlow ACL(4番)が使う ct()/bundle は OpenFlow1.3+ が前提のため、
+# 暗黙のデフォルト(バージョンによって許可プロトコルが変わりうる)に
+# 依存せず明示的に固定する。
+ovs-vsctl set bridge {{ ovs_bridge }} protocols=OpenFlow13
+{% for segment in network_segments %}
+ovs-vsctl --may-exist add-port {{ ovs_bridge }} {{ segment.gw_port }} tag={{ segment.vlan_id }} \
+  -- set interface {{ segment.gw_port }} type=internal
+{% endfor %}
+
+# 2) ゲートウェイ IP の付与と link up(ip addr replace は冪等)
+{% for segment in network_segments %}
+ip addr replace {{ segment.gateway }}/{{ segment.subnet.split('/')[1] }} dev {{ segment.gw_port }}
+ip link set {{ segment.gw_port }} up
+{% endfor %}
+
+# 3) ホスト経由のルーティング(外向き NAT)に必要な転送を有効化する
+sysctl -qw net.ipv4.ip_forward=1
+
+# 4) OpenFlow ACL: セグメント間・セグメント↔default 間の遮断は OVS 自身の
+#    フローテーブルで完結させる(iptables FORWARD を使わない理由は
+#    ovs-segments.flows.j2 冒頭を参照)。
+#
+#    ホスト自身が発信したパケット(dnsmasq の DHCP/DNS 応答、ゲートウェイ宛
+#    ping への応答など)は、OVS からは転送パケットと区別がつかないため、
+#    mangle テーブルの OUTPUT フック(ホスト発のパケットしか通らない)で
+#    CONNMARK により conntrack エントリへマークを付与し、OVS 側の ct() 判定
+#    (ovs-segments.flows.j2 の table 1)で許可する。CONNMARK は raw ではなく
+#    mangle に置く(raw の時点では CONNMARK が扱える conntrack エントリが
+#    まだ存在しないため)。
+{% for segment in network_segments %}
+iptables -t mangle -C OUTPUT -o {{ segment.gw_port }} -j CONNMARK --set-xmark 0x1/0xffffffff 2>/dev/null \
+  || iptables -t mangle -A OUTPUT -o {{ segment.gw_port }} -j CONNMARK --set-xmark 0x1/0xffffffff
+{% endfor %}
+
+#    --bundle によりフロー全置換がアトミックに行われ、「一瞬フローが無い」
+#    空白窓が生じない。
+ovs-ofctl -O OpenFlow13 --bundle replace-flows {{ ovs_bridge }} /etc/minivps/ovs-segments.flows
+
+# 5) NAT: 専用チェーンを毎回作り直し、POSTROUTING からのジャンプだけを
+#    -C で冪等に挿入する
+iptables -t nat -N MINIVPS_NAT 2>/dev/null || true
+iptables -t nat -F MINIVPS_NAT
+iptables -t nat -C POSTROUTING -j MINIVPS_NAT 2>/dev/null \
+  || iptables -t nat -I POSTROUTING 1 -j MINIVPS_NAT
+
+{% for segment in network_segments %}
+# マルチキャスト/ブロードキャストは NAT しない(libvirt の NAT ネットワークと同じ扱い)
+iptables -t nat -A MINIVPS_NAT -s {{ segment.subnet }} -d 224.0.0.0/24 -j RETURN
+iptables -t nat -A MINIVPS_NAT -s {{ segment.subnet }} -d 255.255.255.255/32 -j RETURN
+iptables -t nat -A MINIVPS_NAT -s {{ segment.subnet }} ! -d {{ segment.subnet }} -j MASQUERADE
+{% endfor %}
