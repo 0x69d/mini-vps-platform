@@ -22,10 +22,13 @@
     - name: libvirtd を有効化しグループを設定する
       ansible.builtin.import_tasks: tasks/libvirtd.yml
 
+    - name: OVS セグメント基盤を用意する
+      ansible.builtin.import_tasks: tasks/ovs.yml
+
     - name: default ネットワークを用意する
       ansible.builtin.import_tasks: tasks/network.yml
 
-    - name: セグメント NAT ネットワークを用意する
+    - name: セグメント OVS ネットワークを用意する
       ansible.builtin.include_tasks: tasks/segment_network.yml
       loop: "{{ network_segments }}"
       loop_control:

@@ -1,0 +1,13 @@
+# mini-vps: OVS セグメント用 DHCP/DNS の dnsmasq 設定(Ansible が生成)。
+# libvirt 自身の dnsmasq(virbrN に bind-dynamic)と共存するため、
+# セグメントのゲートウェイポートのアドレスにのみ bind する。
+# DNS も提供する(libvirt NAT ネットワーク時代とゲスト挙動を揃える。
+# router/dns-server はゲートウェイアドレスが既定で配布される)。
+bind-interfaces
+except-interface=lo
+dhcp-authoritative
+dhcp-leasefile=/var/lib/minivps/dnsmasq.leases
+{% for segment in network_segments %}
+interface={{ segment.gw_port }}
+dhcp-range={{ segment.dhcp_start }},{{ segment.dhcp_end }}
+{% endfor %}

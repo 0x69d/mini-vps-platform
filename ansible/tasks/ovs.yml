@@ -1,0 +1,164 @@
+# OVS 統合ブリッジ(ovs-segments)とホスト側 GW/DHCP/NAT/ACL 基盤を冪等に用意する。
+# ブリッジ/ポートの実体は OVSDB が再起動を跨いで保持し、揮発するゲートウェイ IP・
+# OpenFlow ACL・NAT 用 iptables ルールは systemd oneshot(minivps-ovs-net.service)
+# が起動のたびに再構成する。DHCP/DNS はホスト側 dnsmasq(minivps-dnsmasq.service)
+# が提供する(bridge-mode の libvirt ネットワークは <ip>/<dhcp> を持てないため)。
+# セグメント間・セグメント↔default 間の遮断は OVS 自身の OpenFlow ACL で行う
+# (iptables FORWARD を使わない理由は ovs-segments.flows.j2 冒頭を参照)。
+- name: Open vSwitch サービスを起動・自動起動を有効にする(Debian系)
+  become: true
+  ansible.builtin.service:
+    name: openvswitch-switch
+    state: started
+    enabled: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Open vSwitch サービスを起動・自動起動を有効にする(RedHat系)
+  become: true
+  ansible.builtin.service:
+    name: openvswitch
+    state: started
+    enabled: true
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: 設定・リース用ディレクトリを作成する
+  become: true
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/minivps
+    - /var/lib/minivps
+
+# NetworkManager は未設定のインターフェースを自動管理(DHCP 試行)しうるため、
+# ゲートウェイポートを unmanaged にする(Ubuntu server は networkd のため不要)。
+- name: NetworkManager の設定ディレクトリの有無を確認する(RedHat系)
+  ansible.builtin.stat:
+    path: /etc/NetworkManager/conf.d
+  register: minivps_nm_dir
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: ゲートウェイポートを NetworkManager の管理外にする(RedHat系)
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/NetworkManager/conf.d/minivps-unmanaged.conf
+    content: |
+      # mini-vps: OVS ゲートウェイポートは minivps-ovs-net.service が管理する
+      [keyfile]
+      unmanaged-devices=interface-name:{{ network_segments | map(attribute='gw_port') | join(';interface-name:') }}
+    owner: root
+    group: root
+    mode: "0644"
+  register: minivps_nm_conf
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - minivps_nm_dir.stat.exists
+
+- name: NetworkManager の設定を再読込する(RedHat系)
+  become: true
+  ansible.builtin.systemd_service:
+    name: NetworkManager
+    state: reloaded
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - minivps_nm_conf is changed
+
+- name: ネットワーク構成スクリプトを配置する
+  become: true
+  ansible.builtin.template:
+    src: templates/minivps-ovs-net.sh.j2
+    dest: /usr/local/sbin/minivps-ovs-net.sh
+    owner: root
+    group: root
+    mode: "0755"
+  register: minivps_ovs_net_script
+
+- name: OpenFlow ACL のフロー定義を配置する
+  become: true
+  ansible.builtin.template:
+    src: templates/ovs-segments.flows.j2
+    dest: /etc/minivps/ovs-segments.flows
+    owner: root
+    group: root
+    mode: "0644"
+  register: minivps_ovs_flows
+
+- name: dnsmasq の設定を配置する
+  become: true
+  ansible.builtin.template:
+    src: templates/minivps-dnsmasq.conf.j2
+    dest: /etc/minivps/dnsmasq.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: minivps_dnsmasq_conf
+
+- name: systemd ユニットを配置する
+  become: true
+  ansible.builtin.template:
+    src: "templates/{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - minivps-ovs-net.service
+    - minivps-dnsmasq.service
+  register: minivps_ovs_units
+
+- name: minivps-ovs-net を起動・自動起動を有効にする
+  become: true
+  ansible.builtin.systemd_service:
+    name: minivps-ovs-net.service
+    state: >-
+      {{ 'restarted' if (minivps_ovs_net_script is changed or minivps_ovs_units is changed
+         or minivps_ovs_flows is changed) else 'started' }}
+    enabled: true
+    daemon_reload: true
+
+- name: minivps-dnsmasq を起動・自動起動を有効にする
+  become: true
+  ansible.builtin.systemd_service:
+    name: minivps-dnsmasq.service
+    state: "{{ 'restarted' if (minivps_dnsmasq_conf is changed or minivps_ovs_units is changed) else 'started' }}"
+    enabled: true
+    daemon_reload: true
+
+# firewalld 稼働ホスト(Fedora 等)では INPUT が既定拒否のため、ゲートウェイ
+# ポートへの DHCP/DNS を通す必要がある。libvirt 同梱の libvirt ゾーンは
+# 「ホストがブリッジに DHCP/DNS を提供する」用途そのもの(virbrN と同じ扱い)。
+- name: サービス状態を収集する(RedHat系)
+  become: true
+  ansible.builtin.service_facts:
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: libvirt ゾーンの割当済みインターフェースを取得する(firewalld 稼働時)
+  become: true
+  ansible.builtin.command: firewall-cmd --permanent --zone=libvirt --list-interfaces
+  register: minivps_libvirt_zone_ifaces
+  changed_when: false
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts.services['firewalld.service'].state | default('') == 'running'
+
+- name: ゲートウェイポートを libvirt ゾーンへ恒久追加する(firewalld 稼働時)
+  become: true
+  ansible.builtin.command: "firewall-cmd --permanent --zone=libvirt --add-interface={{ item }}"
+  loop: "{{ network_segments | map(attribute='gw_port') | list }}"
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts.services['firewalld.service'].state | default('') == 'running'
+    - item not in (minivps_libvirt_zone_ifaces.stdout | default('')).split()
+  changed_when: true
+  register: minivps_zone_add
+
+- name: firewalld を再読込する(ゾーン変更時)
+  become: true
+  ansible.builtin.command: firewall-cmd --reload
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - minivps_zone_add is changed
+  changed_when: true

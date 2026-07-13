@@ -1,4 +1,4 @@
-# セグメント1件分の NAT ネットワークを冪等に用意する。
+# セグメント1件分の OVS ネットワーク(bridge-mode + VLAN タグ)を冪等に用意する。
 # playbook 側の include_tasks + loop(loop_var: segment)から呼ばれる前提。
 - name: "ネットワークの状態を確認する: {{ segment.name }}"
   become: true
@@ -16,7 +16,7 @@
 
 - name: "ネットワーク定義XMLをレンダリングする: {{ segment.name }}"
   ansible.builtin.template:
-    src: templates/nat-segment.xml.j2
+    src: templates/ovs-segment.xml.j2
     dest: "{{ minivps_segment_net_xml_tmp.path }}"
     mode: "0644"
   when: minivps_segment_net_info.rc != 0
