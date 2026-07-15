@@ -34,6 +34,14 @@ DHCP リース・SSH ログイン・cloud-init 完了(`cloud-init status: done`)
 既定ダウンロード(`fetch: true`)は既定 base image の Ubuntu 26.04 LTS のみに
 絞っており、他の OS は必要になったとき `fetch: true` に変えるか手動で配置する。
 
+`static_routes` を指定した VM については、上記に加えて **再起動後もスタティック
+ルートが残っているか**(`ip route show` で確認、`stop`→`start` または `restart`
+経由)を下表の全 OS について確認する。`network-online.target` の実効性はイメージ
+によって異なり、最小構成イメージでは DHCP リース完了前に reached 判定される
+場合があるため、再起動直後に `ip route show` で経路が消えていないか、
+`journalctl -u minivps-static-routes.service` で `ExecStart` が実際に成功して
+いるかを併せて確認する([README.md の「スタティックルート」](../README.md#スタティックルート)参照)。
+
 | OS | base_image ファイル名 | 自動取得 |
 |---|---|---|
 | Ubuntu 26.04 LTS (Resolute, server cloudimg) | `ubuntu-26.04.img` | ○ |

@@ -1,3 +1,4 @@
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -6,6 +7,7 @@ import yaml
 
 from mini_vps.config import POOL_NAME, POOL_XML
 from mini_vps.resources import (
+    _build_static_routes_fragment,
     _filter_name,
     build_domain_xml,
     build_nwfilter_xml,
@@ -27,7 +29,8 @@ def _spec(**overrides):
         "vcpus": 2,
         "base_image": "ubuntu-24.04.img",
         "disk": 10,
-        "network": "default",
+        "networks": ["default"],
+        "static_routes": [],
     }
     spec.update(overrides)
     return spec
@@ -65,6 +68,45 @@ def test_build_nwfilter_xml_with_empty_filters_has_no_port_rules():
     assert "action='drop'" in xml
 
 
+# --- _build_static_routes_fragment ---
+
+
+def test_build_static_routes_fragment_writes_systemd_unit():
+    spec = _spec(
+        static_routes=[
+            {"destination": "192.168.202.0/24", "via": "192.168.201.1"},
+            {"destination": "192.168.203.0/24", "via": "192.168.201.1"},
+        ]
+    )
+    fragment = _build_static_routes_fragment(spec)
+
+    assert len(fragment["write_files"]) == 1
+    unit_content = fragment["write_files"][0]["content"]
+    assert (
+        fragment["write_files"][0]["path"]
+        == "/etc/systemd/system/minivps-static-routes.service"
+    )
+    assert "ExecStart=-ip route replace 192.168.202.0/24 via 192.168.201.1" in (
+        unit_content
+    )
+    assert "ExecStart=-ip route replace 192.168.203.0/24 via 192.168.201.1" in (
+        unit_content
+    )
+    assert "After=network-online.target" in unit_content
+
+
+def test_build_static_routes_fragment_enables_unit_via_runcmd():
+    spec = _spec(
+        static_routes=[{"destination": "192.168.202.0/24", "via": "192.168.201.1"}]
+    )
+    fragment = _build_static_routes_fragment(spec)
+
+    assert fragment["runcmd"] == [
+        "systemctl daemon-reload",
+        "systemctl enable --now minivps-static-routes.service",
+    ]
+
+
 # --- build_domain_xml ---
 
 
@@ -94,6 +136,41 @@ def test_build_domain_xml_with_filter_adds_filterref():
     assert "<filterref filter='minivps-web-1'/>" in xml
 
 
+def test_build_domain_xml_generates_one_interface_per_network():
+    xml = build_domain_xml(
+        _spec(networks=["seg1", "seg2"]), "/overlay.qcow2", "/seed.iso"
+    )
+    assert xml.count("<interface") == 2
+    assert "source network='seg1'" in xml
+    assert "source network='seg2'" in xml
+
+
+def test_build_domain_xml_multi_nic_output_is_well_formed_xml():
+    # {interfaces} の連結が壊れていないこと(count だけでは検知できない
+    # インデント崩れ・タグの閉じ忘れ等)を ElementTree のパース成否で確認する。
+    xml = build_domain_xml(
+        _spec(networks=["seg1", "seg2"]),
+        "/overlay.qcow2",
+        "/seed.iso",
+        filter_name="minivps-web-1",
+    )
+    root = ET.fromstring(xml)
+    interfaces = root.findall("devices/interface")
+    assert len(interfaces) == 2
+    assert [i.find("source").get("network") for i in interfaces] == ["seg1", "seg2"]
+    assert all(i.find("filterref").get("filter") == "minivps-web-1" for i in interfaces)
+
+
+def test_build_domain_xml_applies_filter_to_all_interfaces():
+    xml = build_domain_xml(
+        _spec(networks=["seg1", "seg2"]),
+        "/overlay.qcow2",
+        "/seed.iso",
+        filter_name="minivps-web-1",
+    )
+    assert xml.count("<filterref filter='minivps-web-1'/>") == 2
+
+
 def test_build_domain_xml_passes_through_host_cpu_features():
     xml = build_domain_xml(_spec(), "/overlay.qcow2", "/seed.iso")
     assert "<cpu mode='host-model'/>" in xml
@@ -115,11 +192,11 @@ def test_build_domain_xml_includes_rng_clock_pm_and_discard():
     assert "discard='unmap'" in xml
 
 
-def test_build_domain_xml_defaults_network_when_absent():
+def test_build_domain_xml_requires_networks_key():
     spec = _spec()
-    del spec["network"]
-    xml = build_domain_xml(spec, "/overlay.qcow2", "/seed.iso")
-    assert "source network='default'" in xml
+    del spec["networks"]
+    with pytest.raises(KeyError):
+        build_domain_xml(spec, "/overlay.qcow2", "/seed.iso")
 
 
 # --- resize_domain_xml ---
@@ -235,6 +312,44 @@ def test_set_domain_filterref_xml_preserves_uuid_and_mac():
     xml = set_domain_filterref_xml(_INACTIVE_DOMAIN_XML_WITH_FILTERREF, None)
     assert "<uuid>4dc9c6c3-36ce-41b8-a33f-5421eb4e58a4</uuid>" in xml
     assert '<mac address="52:54:00:12:34:56" />' in xml
+
+
+# --- set_domain_filterref_xml(複数 interface) ---
+
+_INACTIVE_DOMAIN_XML_WITH_TWO_INTERFACES = """
+<domain type='kvm'>
+  <name>web-1</name>
+  <uuid>4dc9c6c3-36ce-41b8-a33f-5421eb4e58a4</uuid>
+  <memory unit='KiB'>1048576</memory>
+  <currentMemory unit='KiB'>1048576</currentMemory>
+  <vcpu placement='static'>2</vcpu>
+  <devices>
+    <interface type='network'>
+      <mac address='52:54:00:12:34:56'/>
+      <source network='seg1'/>
+    </interface>
+    <interface type='network'>
+      <mac address='52:54:00:12:34:57'/>
+      <source network='seg2'/>
+    </interface>
+  </devices>
+</domain>
+"""
+
+
+def test_set_domain_filterref_xml_adds_to_all_interfaces():
+    xml = set_domain_filterref_xml(
+        _INACTIVE_DOMAIN_XML_WITH_TWO_INTERFACES, "minivps-web-1"
+    )
+    assert xml.count("<filterref") == 2
+
+
+def test_set_domain_filterref_xml_removes_from_all_interfaces():
+    with_filters = set_domain_filterref_xml(
+        _INACTIVE_DOMAIN_XML_WITH_TWO_INTERFACES, "minivps-web-1"
+    )
+    xml = set_domain_filterref_xml(with_filters, None)
+    assert "filterref" not in xml
 
 
 # --- ensure_pool (Mock) ---
@@ -423,6 +538,58 @@ def test_build_seed_iso_includes_write_files_and_runcmd_when_startup_script_set(
     assert "write_files" in parsed
     assert "runcmd" in parsed
     assert "sk-abc" in captured["user_data"]
+
+
+def test_build_seed_iso_includes_static_routes_unit_when_set(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, check):
+        captured["user_data"] = Path(cmd[2]).read_text()
+        _fake_run_writes_dummy_iso(cmd, check)
+
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
+    conn = MagicMock()
+    _seed_pool_mock(monkeypatch)
+
+    spec = _spec(
+        name="web-1",
+        static_routes=[{"destination": "192.168.202.0/24", "via": "192.168.201.1"}],
+    )
+    build_seed_iso(conn, spec, "ssh-ed25519 AAAA...")
+
+    parsed = yaml.safe_load(captured["user_data"])
+    assert "write_files" in parsed
+    assert "runcmd" in parsed
+    assert "minivps-static-routes.service" in captured["user_data"]
+    assert "192.168.202.0/24" in captured["user_data"]
+
+
+def test_build_seed_iso_combines_startup_script_and_static_routes(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, check):
+        captured["user_data"] = Path(cmd[2]).read_text()
+        _fake_run_writes_dummy_iso(cmd, check)
+
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
+    conn = MagicMock()
+    _seed_pool_mock(monkeypatch)
+
+    spec = _spec(
+        name="web-1",
+        startup_script="opencode-sakura-ai-engine",
+        static_routes=[{"destination": "192.168.202.0/24", "via": "192.168.201.1"}],
+    )
+    build_seed_iso(
+        conn, spec, "ssh-ed25519 AAAA...", secrets={"AI_ENGINE_TOKEN": "sk-abc"}
+    )
+
+    parsed = yaml.safe_load(captured["user_data"])
+    # 両方のフラグメントが連結されて write_files/runcmd に入っていること
+    assert len(parsed["write_files"]) == 3  # opencode 2件 + static-routes 1件
+    assert len(parsed["runcmd"]) == 9  # opencode 7件 + static-routes 2件
+    assert "sk-abc" in captured["user_data"]
+    assert "minivps-static-routes.service" in captured["user_data"]
 
 
 def test_build_seed_iso_propagates_missing_secret_error_before_cloud_localds(

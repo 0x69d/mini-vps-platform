@@ -2,7 +2,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from mini_vps.spec import SAMPLE_SPEC, FilterRule, ServerSpec, load_spec
+from mini_vps.spec import SAMPLE_SPEC, FilterRule, ServerSpec, StaticRoute, load_spec
 
 
 def _base_spec_dict(**overrides):
@@ -39,6 +39,38 @@ def test_filter_rule_rejects_unknown_protocol():
         FilterRule(port=80, protocol="icmp")
 
 
+# --- StaticRoute ---
+
+
+def test_static_route_accepts_valid_destination_and_via():
+    route = StaticRoute(destination="192.168.202.0/24", via="192.168.201.1")
+    assert str(route.destination) == "192.168.202.0/24"
+    assert str(route.via) == "192.168.201.1"
+
+
+def test_static_route_rejects_destination_with_host_bits_set():
+    with pytest.raises(ValidationError):
+        StaticRoute(destination="192.168.202.5/24", via="192.168.201.1")
+
+
+@pytest.mark.parametrize("value", ["not-a-network", "192.168.202.0/33", ""])
+def test_static_route_rejects_invalid_destination(value):
+    with pytest.raises(ValidationError):
+        StaticRoute(destination=value, via="192.168.201.1")
+
+
+@pytest.mark.parametrize("value", ["not-an-ip", "192.168.201.0/24", ""])
+def test_static_route_rejects_invalid_via(value):
+    with pytest.raises(ValidationError):
+        StaticRoute(destination="192.168.202.0/24", via=value)
+
+
+def test_static_route_serializes_ips_as_strings():
+    route = StaticRoute(destination="192.168.202.0/24", via="192.168.201.1")
+    dumped = route.model_dump()
+    assert dumped == {"destination": "192.168.202.0/24", "via": "192.168.201.1"}
+
+
 # --- ServerSpec ---
 
 
@@ -55,8 +87,9 @@ def test_server_spec_keeps_explicit_hostname():
 def test_server_spec_applies_field_defaults():
     spec = ServerSpec(**_base_spec_dict())
     assert spec.user == "ubuntu"
-    assert spec.network == "default"
+    assert spec.networks == ["default"]
     assert spec.filters is None
+    assert spec.static_routes == []
 
 
 def test_server_spec_requires_name():
@@ -86,14 +119,57 @@ def test_server_spec_rejects_invalid_name_pattern(value):
 
 @pytest.mark.parametrize("value", ["default", "vps-net", "net_1"])
 def test_server_spec_accepts_valid_network_pattern(value):
-    spec = ServerSpec(**_base_spec_dict(network=value))
-    assert spec.network == value
+    spec = ServerSpec(**_base_spec_dict(networks=[value]))
+    assert spec.networks == [value]
 
 
 @pytest.mark.parametrize("value", ["a/b", "a'b", "<x>", "default;evil"])
 def test_server_spec_rejects_invalid_network_pattern(value):
     with pytest.raises(ValidationError):
-        ServerSpec(**_base_spec_dict(network=value))
+        ServerSpec(**_base_spec_dict(networks=[value]))
+
+
+def test_server_spec_accepts_multiple_networks():
+    spec = ServerSpec(**_base_spec_dict(networks=["seg1", "seg2"]))
+    assert spec.networks == ["seg1", "seg2"]
+
+
+def test_server_spec_rejects_empty_networks():
+    with pytest.raises(ValidationError):
+        ServerSpec(**_base_spec_dict(networks=[]))
+
+
+def test_server_spec_rejects_duplicate_networks():
+    with pytest.raises(ValidationError):
+        ServerSpec(**_base_spec_dict(networks=["seg1", "seg1"]))
+
+
+# --- static_routes ---
+
+
+def test_server_spec_accepts_static_routes():
+    spec = ServerSpec(
+        **_base_spec_dict(
+            static_routes=[{"destination": "192.168.202.0/24", "via": "192.168.201.1"}]
+        )
+    )
+    assert spec.static_routes == [
+        StaticRoute(destination="192.168.202.0/24", via="192.168.201.1")
+    ]
+
+
+def test_server_spec_dump_serializes_static_routes_as_strings():
+    spec = ServerSpec(
+        **_base_spec_dict(
+            static_routes=[{"destination": "192.168.202.0/24", "via": "192.168.201.1"}]
+        )
+    )
+    dumped = spec.model_dump()
+    assert dumped["static_routes"] == [
+        {"destination": "192.168.202.0/24", "via": "192.168.201.1"}
+    ]
+    # yaml.safe_dump できること(libvirt metadata への永続化と同じ経路)を確認する
+    yaml.safe_dump(dumped)
 
 
 @pytest.mark.parametrize("value", ["a/b", "a'b", "<x>", "a b"])

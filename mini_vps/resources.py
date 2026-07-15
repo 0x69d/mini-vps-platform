@@ -11,6 +11,7 @@ import yaml
 from .config import (
     BASE_POOL,
     DOMAIN_XML_TEMPLATE,
+    INTERFACE_XML_TEMPLATE,
     META_DATA_TEMPLATE,
     NWFILTER_PORT_RULE_TEMPLATE,
     NWFILTER_XML_TEMPLATE,
@@ -20,6 +21,10 @@ from .config import (
     SEED_POOL_NAME,
     SEED_POOL_XML,
     SEED_VOL_XML_TEMPLATE,
+    STATIC_ROUTES_EXEC_LINE_TEMPLATE,
+    STATIC_ROUTES_UNIT_NAME,
+    STATIC_ROUTES_UNIT_PATH,
+    STATIC_ROUTES_UNIT_TEMPLATE,
 )
 from .startup_scripts import render_startup_script
 
@@ -68,11 +73,40 @@ def create_overlay_volume(conn, spec) -> str:
     return pool.createXML(xml, 0).path()
 
 
+def _build_static_routes_fragment(spec) -> dict:
+    """static_routes から systemd ユニットの cloud-init フラグメントを組み立てる。
+
+    ip route add ではなく再起動のたびに再適用する systemd ユニット化により、
+    runcmd(初回起動時のみ実行)では失われる永続化を実現する。
+    """
+    exec_lines = "\n".join(
+        STATIC_ROUTES_EXEC_LINE_TEMPLATE.format(
+            destination=route["destination"], via=route["via"]
+        )
+        for route in spec["static_routes"]
+    )
+    unit_content = STATIC_ROUTES_UNIT_TEMPLATE.format(exec_lines=exec_lines)
+    write_files = [
+        {
+            "path": STATIC_ROUTES_UNIT_PATH,
+            "permissions": "0644",
+            "content": unit_content,
+        }
+    ]
+    runcmd = [
+        "systemctl daemon-reload",
+        f"systemctl enable --now {STATIC_ROUTES_UNIT_NAME}",
+    ]
+    return {"write_files": write_files, "runcmd": runcmd}
+
+
 def _build_user_data(spec, pubkey, secrets: dict[str, str] | None) -> dict:
     """cloud-config の dict(YAML 化前)を組み立てる。
 
-    hostname/users は常に含める。spec["startup_script"] が指定されていれば、
-    対応するテンプレートをレンダリングして write_files/runcmd を追加する。
+    hostname/users は常に含める。spec["startup_script"] と spec["static_routes"] は
+    それぞれ独立に write_files/runcmd フラグメントを生成し、両方あれば連結する
+    (同時に使える必要があるため)。どちらも無ければ write_files/runcmd キー自体を
+    含めない。
     """
     data = {
         "hostname": spec["hostname"],
@@ -85,11 +119,25 @@ def _build_user_data(spec, pubkey, secrets: dict[str, str] | None) -> dict:
             }
         ],
     }
+
+    write_files = []
+    runcmd = []
+
     startup_script = spec.get("startup_script")
     if startup_script:
         fragment = render_startup_script(startup_script, spec, secrets)
-        data["write_files"] = fragment["write_files"]
-        data["runcmd"] = fragment["runcmd"]
+        write_files += fragment["write_files"]
+        runcmd += fragment["runcmd"]
+
+    if spec.get("static_routes"):
+        fragment = _build_static_routes_fragment(spec)
+        write_files += fragment["write_files"]
+        runcmd += fragment["runcmd"]
+
+    if write_files:
+        data["write_files"] = write_files
+    if runcmd:
+        data["runcmd"] = runcmd
     return data
 
 
@@ -164,18 +212,23 @@ def build_nwfilter_xml(spec) -> str:
 def build_domain_xml(spec, overlay_path, seed_path, filter_name=None) -> str:
     """Domain XML 文字列を組み立てて返す。
 
-    filter_name はインターフェースに紐づける nwfilter 名(None なら付けない)。
+    spec["networks"] の要素数だけ <interface> を生成する(複数NIC対応)。
+    filter_name は全 interface に紐づける nwfilter 名(None なら付けない、
+    nwfilter は VM 全体の inbound 許可という意味論のため全 NIC に同一のものを付ける)。
     """
     memory_kib = spec["memory"] * 1024
     filterref = f"<filterref filter='{filter_name}'/>" if filter_name else ""
+    interfaces = "".join(
+        INTERFACE_XML_TEMPLATE.format(network=network, filterref=filterref)
+        for network in spec["networks"]
+    )
     xml = DOMAIN_XML_TEMPLATE.format(
         name=spec["name"],
         memory_kib=memory_kib,
         vcpus=spec["vcpus"],
         overlay_path=overlay_path,
         seed_path=seed_path,
-        network=spec.get("network", "default"),
-        filterref=filterref,
+        interfaces=interfaces,
     )
     return xml
 
@@ -211,7 +264,9 @@ def resize_domain_xml(xml_text: str, memory_kib: int, vcpus: int) -> str:
 def set_domain_filterref_xml(xml_text: str, filter_name: str | None) -> str:
     """Domain XML の <devices><interface> 配下の <filterref> のみを書き換えて返す。
 
-    resize_domain_xml と同様の純粋関数。
+    resize_domain_xml と同様の純粋関数。複数NIC(<interface> 複数)の場合は
+    全 interface に対して同じ操作を適用する(nwfilter は VM 全体の inbound 許可
+    という意味論のため)。
     filter_name が None なら既存の <filterref> を除去し(無ければ何もしない)、
     文字列なら <filterref filter='{filter_name}'/> を追加する(既存にあれば
     filter 属性だけ書き換える)。「フィルタなし→あり」「あり→なし」
@@ -219,15 +274,16 @@ def set_domain_filterref_xml(xml_text: str, filter_name: str | None) -> str:
     同じ呼び出し方でこの1関数を使える。
     """
     root = ET.fromstring(xml_text)
-    interface_el = root.find("devices/interface")
-    filterref_el = interface_el.find("filterref")
 
-    if filter_name is None:
-        if filterref_el is not None:
-            interface_el.remove(filterref_el)
-    else:
-        if filterref_el is None:
-            filterref_el = ET.SubElement(interface_el, "filterref")
-        filterref_el.set("filter", filter_name)
+    for interface_el in root.findall("devices/interface"):
+        filterref_el = interface_el.find("filterref")
+
+        if filter_name is None:
+            if filterref_el is not None:
+                interface_el.remove(filterref_el)
+        else:
+            if filterref_el is None:
+                filterref_el = ET.SubElement(interface_el, "filterref")
+            filterref_el.set("filter", filter_name)
 
     return ET.tostring(root, encoding="unicode")

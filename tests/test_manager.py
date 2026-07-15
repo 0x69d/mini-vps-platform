@@ -189,6 +189,40 @@ def test_create_raises_conflict_when_spec_differs(monkeypatch):
         mgr.create(_full_spec(disk=20))
 
 
+def test_create_raises_conflict_when_networks_differs(monkeypatch):
+    """不変フィールド(networks)の差分は収束対象外のため ServerConflict になる。"""
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: MagicMock())
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda dom: True)
+    monkeypatch.setattr(
+        "mini_vps.manager._read_spec", lambda dom: _full_spec(networks=["default"])
+    )
+
+    with pytest.raises(ServerConflict):
+        mgr.create(_full_spec(networks=["seg1", "seg2"]))
+
+
+def test_create_raises_conflict_when_static_routes_differs(monkeypatch):
+    """不変フィールド(static_routes)の差分は収束対象外のため ServerConflict になる。"""
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: MagicMock())
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda dom: True)
+    monkeypatch.setattr(
+        "mini_vps.manager._read_spec", lambda dom: _full_spec(static_routes=[])
+    )
+
+    with pytest.raises(ServerConflict):
+        mgr.create(
+            _full_spec(
+                static_routes=[
+                    {"destination": "192.168.202.0/24", "via": "192.168.201.1"}
+                ]
+            )
+        )
+
+
 def test_create_raises_conflict_when_existing_is_unmanaged(monkeypatch):
     conn = MagicMock()
     mgr = ServerManager(conn)
