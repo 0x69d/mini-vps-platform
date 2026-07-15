@@ -55,8 +55,9 @@ class StaticRoute(BaseModel):
 class NetworkAttachment(BaseModel):
     """静的IPで結線するNIC1件(ネットワーク名・アドレス・任意のゲートウェイ)。
 
-    gateway/address 間のサブネット整合性は検証しない。StaticRoute.via と同様、
-    運用者が決め打ちで指定する値として扱う。
+    gateway は address のサブネット内にあることを検証する(同一NIC・同一セグメント内で
+    あるべき値のため)。StaticRoute.via(次ホップ)とは異なり、運用者の決め打ちに
+    委ねる対象ではない。
     """
 
     name: _NetworkName
@@ -72,6 +73,16 @@ class NetworkAttachment(BaseModel):
     def _serialize_gateway(self, value: ipaddress.IPv4Address | None) -> str | None:
         """metadata永続化(yaml.safe_dump)向けに文字列化する。"""
         return str(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def _validate_gateway_in_subnet(self) -> NetworkAttachment:
+        """サブネット外を指す gateway の設定ミスを拒否する。"""
+        if self.gateway is not None and self.gateway not in self.address.network:
+            raise ValueError(
+                f"gateway({self.gateway})がaddress({self.address})の"
+                f"サブネット({self.address.network})外です"
+            )
+        return self
 
 
 class ServerSpecInput(BaseModel):

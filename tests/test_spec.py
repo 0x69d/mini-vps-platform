@@ -178,6 +178,13 @@ def test_network_attachment_rejects_invalid_gateway():
         NetworkAttachment(name="seg1", address="192.168.201.10/24", gateway="not-an-ip")
 
 
+def test_network_attachment_rejects_gateway_outside_subnet():
+    with pytest.raises(ValidationError):
+        NetworkAttachment(
+            name="seg1", address="192.168.201.10/24", gateway="192.168.202.1"
+        )
+
+
 def test_network_attachment_serializes_ips_as_strings():
     attachment = NetworkAttachment(
         name="seg1", address="192.168.201.10/24", gateway="192.168.201.1"
