@@ -21,7 +21,7 @@ def test_ensure_network_active_starts_inactive_network():
     net.isActive.return_value = False
     conn.networkLookupByName.return_value = net
 
-    ensure_network_active(conn, {"network": "default"})
+    ensure_network_active(conn, {"networks": ["default"]})
 
     net.create.assert_called_once()
 
@@ -32,9 +32,31 @@ def test_ensure_network_active_skips_when_already_active():
     net.isActive.return_value = True
     conn.networkLookupByName.return_value = net
 
-    ensure_network_active(conn, {"network": "default"})
+    ensure_network_active(conn, {"networks": ["default"]})
 
     net.create.assert_not_called()
+
+
+def test_ensure_network_active_checks_every_network():
+    conn = MagicMock()
+    nets = {"seg1": MagicMock(), "seg2": MagicMock()}
+    nets["seg1"].isActive.return_value = False
+    nets["seg2"].isActive.return_value = True
+    conn.networkLookupByName.side_effect = lambda name: nets[name]
+
+    ensure_network_active(conn, {"networks": ["seg1", "seg2"]})
+
+    conn.networkLookupByName.assert_any_call("seg1")
+    conn.networkLookupByName.assert_any_call("seg2")
+    nets["seg1"].create.assert_called_once()
+    nets["seg2"].create.assert_not_called()
+
+
+def test_ensure_network_active_requires_networks_key():
+    conn = MagicMock()
+
+    with pytest.raises(KeyError):
+        ensure_network_active(conn, {})
 
 
 # --- provision ---

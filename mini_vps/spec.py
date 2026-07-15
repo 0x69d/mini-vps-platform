@@ -4,12 +4,19 @@
 両入口を同じモデルへ収束させる。
 """
 
+import ipaddress
 import pathlib
 from importlib.resources import files
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StringConstraints,
+    field_serializer,
+    model_validator,
+)
 
 from .startup_scripts import STARTUP_SCRIPT_NAMES
 
@@ -22,12 +29,27 @@ _NAME_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$"
 # 展開されるため、Debian/Ubuntu の adduser が許容する POSIX ユーザー名の慣例に合わせる。
 _USERNAME_PATTERN = r"^[a-z_][a-z0-9_-]{0,31}$"
 
+# networks の要素用。_NAME_PATTERN と同じ文字種制約を list の各要素に適用する。
+_NetworkName = Annotated[str, StringConstraints(pattern=_NAME_PATTERN)]
+
 
 class FilterRule(BaseModel):
     """inbound 許可ルール1件(単一ポート・単一プロトコル)。"""
 
     port: int = Field(ge=1, le=65535)
     protocol: Literal["tcp", "udp"]
+
+
+class StaticRoute(BaseModel):
+    """ゲストに注入するスタティックルート1件(宛先ネットワークと次ホップ)。"""
+
+    destination: ipaddress.IPv4Network
+    via: ipaddress.IPv4Address
+
+    @field_serializer("destination", "via")
+    def _serialize_ip(self, value: object) -> str:
+        """metadata永続化(yaml.safe_dump)向けに文字列化する。"""
+        return str(value)
 
 
 class ServerSpecInput(BaseModel):
@@ -43,12 +65,23 @@ class ServerSpecInput(BaseModel):
     disk: int = Field(gt=0)
     hostname: str | None = Field(default=None, pattern=_NAME_PATTERN)
     user: str = Field(default="ubuntu", pattern=_USERNAME_PATTERN)
-    network: str = Field(default="default", pattern=_NAME_PATTERN)
+    networks: list[_NetworkName] = Field(
+        default_factory=lambda: ["default"], min_length=1
+    )
     # None: フィルタ無し(全許可)。[]: 意図的な全 inbound 拒否。
     filters: list[FilterRule] | None = None
+    # ゲストに注入するスタティックルート。空リストなら追加ルート無し。
+    static_routes: list[StaticRoute] = Field(default_factory=list)
     # 初回起動時に適用する cloud-init テンプレート名。非秘匿のため metadata への
     # 永続化を許容する(秘密情報は別途 secrets 引数で渡し、ここには含めない)。
     startup_script: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_networks_unique(self) -> ServerSpecInput:
+        """同一ネットワークへの重複所属を検証する(設定ミスの可能性が高いため拒否する)。"""
+        if len(self.networks) != len(set(self.networks)):
+            raise ValueError(f"networks に重複があります: {self.networks!r}")
+        return self
 
     @model_validator(mode="after")
     def _validate_startup_script(self) -> ServerSpecInput:

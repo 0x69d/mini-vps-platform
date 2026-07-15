@@ -89,11 +89,7 @@ DOMAIN_XML_TEMPLATE = """
       <target dev='sda' bus='sata'/>
       <readonly/>
     </disk>
-    <interface type='network'>
-      <source network='{network}'/>
-      <model type='virtio'/>
-      {filterref}
-    </interface>
+{interfaces}\
     <rng model='virtio'>
       <backend model='random'>/dev/urandom</backend>
     </rng>
@@ -101,6 +97,17 @@ DOMAIN_XML_TEMPLATE = """
     <console type='pty'><target type='serial' port='0'/></console>
   </devices>
 </domain>
+"""
+
+# VM 1台につき spec["networks"] の要素数だけ連結して <devices> に埋め込む。
+# str.format はブロックの繰り返し生成ができないため、DOMAIN_XML_TEMPLATE から
+# <interface> 部分だけを分離している。
+INTERFACE_XML_TEMPLATE = """\
+    <interface type='network'>
+      <source network='{network}'/>
+      <model type='virtio'/>
+      {filterref}
+    </interface>
 """
 
 # 宣言ポート1件分の accept ルール。protocol("tcp"/"udp")に応じてタグ名を差し替える。
@@ -129,3 +136,29 @@ NWFILTER_XML_TEMPLATE = """
   </rule>
 </filter>
 """
+
+# spec["static_routes"] をゲスト起動時に永続適用するための systemd oneshot ユニット。
+# runcmd(cloud-init 初回起動時のみ実行)だけでは再起動後にルートが消えるため、
+# systemctl enable でブートのたびに再適用する形にしている。
+STATIC_ROUTES_UNIT_NAME = "minivps-static-routes.service"
+STATIC_ROUTES_UNIT_PATH = f"/etc/systemd/system/{STATIC_ROUTES_UNIT_NAME}"
+
+STATIC_ROUTES_UNIT_TEMPLATE = """\
+[Unit]
+Description=mini-vps-platform static routes (managed, do not edit)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+{exec_lines}
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+# ExecStart 1行分。先頭の "-" は、この経路の via が到達不能で失敗しても他の
+# ExecStart 行の適用を止めないためのもの(失敗はユニット全体のステータスには
+# 現れなくなるため、確認には journalctl -u が必要)。
+STATIC_ROUTES_EXEC_LINE_TEMPLATE = "ExecStart=-ip route replace {destination} via {via}"

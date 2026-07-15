@@ -16,10 +16,11 @@ from .spec import read_pubkey
 
 
 def ensure_network_active(conn, spec) -> None:
-    """VM スペックが参照する network が非アクティブなら起動する。"""
-    net = conn.networkLookupByName(spec.get("network", "default"))
-    if not net.isActive():
-        net.create()
+    """VM スペックが参照する networks それぞれについて、非アクティブなら起動する。"""
+    for network in spec["networks"]:
+        net = conn.networkLookupByName(network)
+        if not net.isActive():
+            net.create()
 
 
 def provision(conn, spec, secrets: dict[str, str] | None = None) -> libvirt.virDomain:

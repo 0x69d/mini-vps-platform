@@ -24,8 +24,11 @@ from .spec import read_pubkey
 
 # create() が停止中の既存 VM に対して収束(defineXML の最小差分編集)を許す
 # フィールド。それ以外のフィールドの差分は ServerConflict で拒否する。
-# network はインターフェース XML の書き換えだけなら技術的には可能だが、
+# networks はインターフェース XML の書き換えだけなら技術的には可能だが、
 # 実運用への影響が大きいためスコープ外とし、明示的に別操作として扱う。
+# static_routes は cloud-init 由来(seed ISO 生成時にのみ反映)であり、
+# _converge() は domain XML の差分編集のみで seed ISO を作り直さないため、
+# mutable に含めても実際には反映されない(startup_script と同じ制約)。
 # 新しい可変フィールドを追加する場合はここに追記する。
 _MUTABLE_FIELDS = frozenset({"memory", "vcpus", "filters"})
 
