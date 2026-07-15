@@ -104,6 +104,7 @@ DOMAIN_XML_TEMPLATE = """
 # <interface> 部分だけを分離している。
 INTERFACE_XML_TEMPLATE = """\
     <interface type='network'>
+      <mac address='{mac}'/>
       <source network='{network}'/>
       <model type='virtio'/>
       {filterref}

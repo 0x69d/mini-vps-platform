@@ -1,5 +1,6 @@
 """ストレージプール・volume・ISO・domain XML のリソース生成。"""
 
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -27,6 +28,59 @@ from .config import (
     STATIC_ROUTES_UNIT_TEMPLATE,
 )
 from .startup_scripts import render_startup_script
+
+# QEMU/libvirt が自動生成する MAC で慣習的に使う locally-administered なプレフィックス。
+_MAC_PREFIX = "52:54:00"
+
+
+def _mac_for_interface(name: str, index: int) -> str:
+    """VM名とNICインデックスから決定的なMACアドレスを生成する。
+
+    build_seed_iso() の network-config 生成が build_domain_xml() より先に走る
+    (provision() の呼び出し順)ため、MACをlibvirtの自動生成に委ねられず、Python側で
+    決定的に確定させる必要がある。組み込み hash() はプロセスごとにランダム化される
+    ため使えず(CLI/API/exporter が別プロセスで動くため決定性が壊れる)、sha256を使う。
+    """
+    digest = hashlib.sha256(f"{name}/{index}".encode()).digest()
+    suffix = ":".join(f"{b:02x}" for b in digest[:3])
+    return f"{_MAC_PREFIX}:{suffix}"
+
+
+def _network_name(net) -> str:
+    """NIC1件分の networks 要素からネットワーク名を取り出す。
+
+    文字列(DHCP)ならそのまま返し、NetworkAttachment の dict(静的IP)なら
+    name キーを返す。
+    """
+    return net if isinstance(net, str) else net["name"]
+
+
+def _has_static_network(spec) -> bool:
+    """spec["networks"] に静的IPを持つNIC(NetworkAttachment)が1つでもあるか判定する。"""
+    return any(not isinstance(net, str) for net in spec["networks"])
+
+
+def _build_network_config(spec) -> dict:
+    """spec["networks"] から cloud-init network-config v2 の dict を組み立てる。
+
+    静的IPを持つNICが1つでもある場合にのみ呼ばれる想定。network-config を
+    cloud-init に渡すとそれが唯一の設定源になり、記載の無いNICは一切設定されなく
+    なるため、DHCPの文字列要素も含めて全NICをMACマッチで列挙する。gatewayが
+    指定されている場合のみ default route を追加する(netplan v2では非推奨の
+    gateway4ではなく routes: [{to: default, via: ...}] を使う)。
+    """
+    ethernets = {}
+    for index, net in enumerate(spec["networks"]):
+        mac = _mac_for_interface(spec["name"], index)
+        iface_key = f"eth{index}"
+        if isinstance(net, str):
+            ethernets[iface_key] = {"match": {"macaddress": mac}, "dhcp4": True}
+        else:
+            entry = {"match": {"macaddress": mac}, "addresses": [net["address"]]}
+            if net.get("gateway"):
+                entry["routes"] = [{"to": "default", "via": net["gateway"]}]
+            ethernets[iface_key] = entry
+    return {"network": {"version": 2, "ethernets": ethernets}}
 
 
 def ensure_pool(conn, name, xml) -> libvirt.virStoragePool:
@@ -166,9 +220,20 @@ def build_seed_iso(conn, spec, pubkey, secrets: dict[str, str] | None = None) ->
         with open(md_file_path, "w", encoding="utf-8") as md_file:
             md_file.write(meta_data)
 
-        subprocess.run(
-            ["cloud-localds", iso_path, ud_file_path, md_file_path], check=True
-        )
+        cmd = ["cloud-localds"]
+        if _has_static_network(spec):
+            # 静的IPが1つでもあれば全NICを列挙したnetwork-configを渡す。無ければ
+            # -N を一切付けず、cmd は従来通り output/user-data/meta-data の3引数
+            # (常に末尾3要素なので、cloud-localds 呼び出しの後方互換が保たれる)。
+            nc_file_path = os.path.join(tmp_dir, "network-config")
+            with open(nc_file_path, "w", encoding="utf-8") as nc_file:
+                nc_file.write(
+                    yaml.safe_dump(_build_network_config(spec), sort_keys=False)
+                )
+            cmd += ["-N", nc_file_path]
+        cmd += [iso_path, ud_file_path, md_file_path]
+
+        subprocess.run(cmd, check=True)
 
         pool = ensure_seed_pool(conn)
         if vol_name in {v.name() for v in pool.listAllVolumes()}:
@@ -212,15 +277,22 @@ def build_nwfilter_xml(spec) -> str:
 def build_domain_xml(spec, overlay_path, seed_path, filter_name=None) -> str:
     """Domain XML 文字列を組み立てて返す。
 
-    spec["networks"] の要素数だけ <interface> を生成する(複数NIC対応)。
+    spec["networks"] の要素数だけ <interface> を生成する(複数NIC対応)。各NICには
+    (name, index) から決定的に導出したMACを常に埋め込む(cloud-init network-config
+    でのMACマッチに必要。静的IPを持たないVMでも無害 — networks は不変フィールドで
+    build_domain_xml は provision() の新規作成時にしか呼ばれないため)。
     filter_name は全 interface に紐づける nwfilter 名(None なら付けない、
     nwfilter は VM 全体の inbound 許可という意味論のため全 NIC に同一のものを付ける)。
     """
     memory_kib = spec["memory"] * 1024
     filterref = f"<filterref filter='{filter_name}'/>" if filter_name else ""
     interfaces = "".join(
-        INTERFACE_XML_TEMPLATE.format(network=network, filterref=filterref)
-        for network in spec["networks"]
+        INTERFACE_XML_TEMPLATE.format(
+            network=_network_name(net),
+            mac=_mac_for_interface(spec["name"], index),
+            filterref=filterref,
+        )
+        for index, net in enumerate(spec["networks"])
     )
     xml = DOMAIN_XML_TEMPLATE.format(
         name=spec["name"],

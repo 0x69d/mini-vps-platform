@@ -20,6 +20,9 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 - セグメント分離: 複数の独立 NAT ネットワークで VM を隔離する。
 - パケットフィルタ: `filters` で宣言した inbound ポートのみ許可する
   (作成後に `vm-spec.yaml` を編集して再度 `create`/`PUT` することで変更できる)。
+- 静的IP割当: `networks` の要素に `NetworkAttachment`(`name`/`address`/`gateway`)を
+  指定すると、cloud-init の `network-config` 経由で固定IPを割り当てる
+  ([静的IP割当](#静的ip割当)参照)。
 - 監視: Prometheus + Grafana によってメトリクスを可視化する。
 
 ### 含まないもの
@@ -29,12 +32,16 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 - パケットフィルタの IPv6・egress・稼働中 VM へのライブ反映(ルール変更は停止中の VM に
   限り inbound・IPv4 のみ対応、反映は次回起動時から)。
 - アラート通知(Alertmanager 等)。
-- 静的IP割当(cloud-init network-config によるアドレス固定・MAC アドレス明示指定)。
-  `static_routes` の `via`(次ホップ)は運用者が決め打ちで指定する値として扱う。
+- MAC アドレスのユーザー明示指定(`(name, index)` から内部で決定的に自動生成する。
+  [静的IP割当](#静的ip割当)参照)。
 - `status`/`get` の IP アドレス表示は、複数 NIC の VM でも最初に見つかった1件のみ
-  (全 NIC の IP 一覧表示は非対応)。
+  (全 NIC の IP 一覧表示は非対応。静的アドレスを持つ NIC があれば起動状態に関わらず
+  それを優先し、無ければ起動中の DHCP リースを表示する)。
 - `networks`・`static_routes` は `create()` の可変フィールドではない
   (`startup_script` と同様、変更するには対象 VM の削除・再作成が必要)。
+- 静的アドレスと Ansible 側 DHCP レンジ(`.2`〜`.254`、セグメント全域)の衝突回避
+  (dnsmasq の ICMP 到達確認である程度は緩和されるが、起動順序次第で衝突しうる。
+  レンジを狭める調整は本プロジェクトのスコープ外)。
 
 ## アーキテクチャ
 
@@ -65,7 +72,7 @@ disk: 10                      # GB
 | `disk` | int (GB, 正の整数) | 必須 | — |
 | `hostname` | str（`name` と同じ文字種制約） | 任意 | 未指定なら `name` で補完 |
 | `user` | str（小文字・数字・`-`・`_`、先頭は小文字かアンダースコア、32文字以内） | 任意 | `ubuntu` |
-| `networks` | list[str]（各要素は `name` と同じ文字種制約、1件以上、重複不可）。Ansible で事前定義済みのネットワーク名(`default`・`seg1`〜`seg3`)を指定する。未定義名を指定すると作成時に libvirt エラーになる。複数指定すると VM に複数 NIC が付く | 任意 | `["default"]` |
+| `networks` | list[str \| NetworkAttachment]（各要素は文字列(DHCP)か `NetworkAttachment`(静的IP)、1件以上、ネットワーク名の重複不可)。Ansible で事前定義済みのネットワーク名(`default`・`seg1`〜`seg3`)を指定する。未定義名を指定すると作成時に libvirt エラーになる。複数指定すると VM に複数 NIC が付く | 任意 | `["default"]` |
 | `filters` | list[FilterRule] \| null | 任意 | 未指定(null)なら全 inbound 許可。`[]` を明示すると全 inbound 拒否 |
 | `static_routes` | list[StaticRoute] | 任意 | 未指定なら追加ルート無し([スタティックルート](#スタティックルート)参照) |
 | `startup_script` | str \| null | 任意 | 未指定(null)。指定する場合は既知のテンプレート名のみ許可([docs/startup-scripts.md](docs/startup-scripts.md) 参照) |
@@ -73,6 +80,10 @@ disk: 10                      # GB
 `FilterRule`: `{port: int(1-65535), protocol: "tcp" \| "udp"}` の inbound 許可ルール1件。
 
 `StaticRoute`: `{destination: str(CIDR), via: str(IPv4アドレス)}` のスタティックルート1件。
+
+`NetworkAttachment`: `{name: str, address: str(CIDR、ホストアドレス), gateway: str(IPv4アドレス) \| null}`
+の静的IP割当1件([静的IP割当](#静的ip割当)参照)。`gateway` は任意で、省略時はそのNICに
+デフォルトルートを追加しない。
 
 > **警告**: `filters` を1件でも宣言すると、明示したポート以外の inbound は SSH(22番)を含めて
 > すべて拒否される。SSH アクセスを維持したい場合は `{port: 22, protocol: "tcp"}` を
@@ -134,6 +145,49 @@ networks: [seg1, seg2]
 セグメントを追加する場合は `ansible/vars/network_segments.yml` に1エントリ追記して
 playbook を再実行する(サブネットとブリッジ名は既存と重複させないこと)。
 
+## 静的IP割当
+
+`networks` の要素にネットワーク名の文字列ではなく `NetworkAttachment` オブジェクトを
+指定すると、そのNICに固定IPを割り当てる。DHCPの文字列要素と混在できる。
+
+```yaml
+name: router-1
+memory: 1024
+vcpus: 2
+base_image: ubuntu-26.04.img
+disk: 10
+networks:
+  - default
+  - name: seg1
+    address: 192.168.201.10/24
+  - name: seg2
+    address: 192.168.202.10/24
+    gateway: 192.168.202.1
+```
+
+**仕組み**: `create()` は VM名とNICインデックスから決定的にMACアドレスを生成し
+(`52:54:00` プレフィックス)、domain XML の各 `<interface>` に埋め込む。静的IPを持つ
+NICが1つでもあれば、cloud-init の `network-config`(v2形式)を生成し
+`cloud-localds -N` で seed ISO に組み込む。`network-config` を渡すとそれが唯一の
+設定源になるため、DHCPの文字列要素も含めて全NICをMACマッチで列挙する(記載の無い
+NICは cloud-init から一切設定されなくなるため)。静的IPを1つも持たないVMでは
+`network-config` 自体を生成せず、cloud-localds の呼び出しも変わらない。
+
+`gateway` を指定すると、そのNICに `routes: [{to: default, via: gateway}]` として
+デフォルトルートを追加する。省略するとそのNICにはルートを追加しない。`gateway` は
+`address` のサブネット内にあることを検証し、外れていれば作成時にエラーになる
+(同一NIC・同一セグメント内であるべき値のため、`static_routes` の `via` とは異なり
+運用者の決め打ちには委ねない)。
+
+**`status`/`get` のIP表示**: 静的アドレスを持つNICが1つでもあれば、VMの起動状態に
+関わらずそれを(宣言値として)優先表示する。cloud-initが実際に適用したかは確認しない。
+静的アドレスが無ければ従来通り起動中のみDHCPリースを表示する。いずれの場合も複数NIC
+中の最初の1件のみ。
+
+**既知の制約**: Ansible が定義するDHCPレンジ(`.2`〜`.254`、セグメント全域)は静的
+アドレスの割当範囲と重複しうる。dnsmasqのICMP到達確認である程度は緩和されるが、
+起動順序次第では衝突する可能性がある。レンジを狭める調整は本プロジェクトのスコープ外。
+
 ## スタートアップスクリプト
 
 名前付き cloud-init テンプレートで VM の初期セットアップを自動化する機能。
@@ -160,9 +214,9 @@ static_routes:
     via: 192.168.201.1
 ```
 
-`via` はセグメント内の到達可能な IP を運用者が決め打ちで指定する値であり、本プロジェクトは
-その IP を安定させる仕組み(静的IP割当・cloud-init network-config)を持たない
-(「含まないもの」参照)。
+`via` はセグメント内の到達可能な IP を運用者が決め打ちで指定する値であり、`static_routes`
+自体はそれを検証しない。次ホップ側(例: ルータVM)のIPを安定させたい場合は
+[静的IP割当](#静的ip割当)を参照。
 
 **永続化の仕組み**: cloud-init の `runcmd` は初回起動時にしか実行されないため、単純な
 `ip route add` では VM 再起動後にルートが消える。そのため `ip route replace` を

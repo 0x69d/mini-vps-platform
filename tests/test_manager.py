@@ -14,6 +14,7 @@ from mini_vps.manager import (
     _is_managed,
     _lookup,
     _read_spec,
+    _static_ipv4,
     _status_of,
     _write_spec,
     register_quiet_error_handler,
@@ -129,7 +130,8 @@ def test_status_of_running_includes_ip(monkeypatch):
     lease = MagicMock(return_value="10.0.0.5")
     monkeypatch.setattr("mini_vps.manager._lease_ipv4", lease)
 
-    assert _status_of(dom) == {"state": "running", "ip": "10.0.0.5"}
+    spec = {"networks": ["default"]}
+    assert _status_of(dom, spec) == {"state": "running", "ip": "10.0.0.5"}
     lease.assert_called_once_with(dom)
 
 
@@ -139,9 +141,57 @@ def test_status_of_non_running_has_no_ip(monkeypatch):
     lease = MagicMock()
     monkeypatch.setattr("mini_vps.manager._lease_ipv4", lease)
 
-    assert _status_of(dom) == {"state": "shutoff", "ip": None}
+    spec = {"networks": ["default"]}
+    assert _status_of(dom, spec) == {"state": "shutoff", "ip": None}
     # 起動中でなければリースは引かない
     lease.assert_not_called()
+
+
+def test_status_of_prefers_static_address_when_running(monkeypatch):
+    dom = MagicMock()
+    dom.state.return_value = (libvirt.VIR_DOMAIN_RUNNING, 1)
+    lease = MagicMock(return_value="10.0.0.5")
+    monkeypatch.setattr("mini_vps.manager._lease_ipv4", lease)
+
+    spec = {
+        "networks": [
+            "default",
+            {"name": "seg1", "address": "192.168.201.10/24", "gateway": None},
+        ]
+    }
+    assert _status_of(dom, spec) == {"state": "running", "ip": "192.168.201.10"}
+    # 静的アドレスが見つかればDHCPリースは引かない
+    lease.assert_not_called()
+
+
+def test_status_of_shows_static_address_even_when_not_running(monkeypatch):
+    dom = MagicMock()
+    dom.state.return_value = (libvirt.VIR_DOMAIN_SHUTOFF, 1)
+    lease = MagicMock()
+    monkeypatch.setattr("mini_vps.manager._lease_ipv4", lease)
+
+    spec = {
+        "networks": [{"name": "seg1", "address": "192.168.201.10/24", "gateway": None}]
+    }
+    assert _status_of(dom, spec) == {"state": "shutoff", "ip": "192.168.201.10"}
+    lease.assert_not_called()
+
+
+# --- _static_ipv4 ---
+
+
+def test_static_ipv4_returns_first_match_when_multiple_static_nics():
+    spec = {
+        "networks": [
+            {"name": "seg1", "address": "192.168.201.10/24", "gateway": None},
+            {"name": "seg2", "address": "192.168.202.10/24", "gateway": None},
+        ]
+    }
+    assert _static_ipv4(spec) == "192.168.201.10"
+
+
+def test_static_ipv4_returns_none_when_all_dhcp():
+    assert _static_ipv4({"networks": ["default", "seg1"]}) is None
 
 
 # --- ServerManager.create ---

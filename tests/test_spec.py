@@ -2,7 +2,14 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from mini_vps.spec import SAMPLE_SPEC, FilterRule, ServerSpec, StaticRoute, load_spec
+from mini_vps.spec import (
+    SAMPLE_SPEC,
+    FilterRule,
+    NetworkAttachment,
+    ServerSpec,
+    StaticRoute,
+    load_spec,
+)
 
 
 def _base_spec_dict(**overrides):
@@ -142,6 +149,91 @@ def test_server_spec_rejects_empty_networks():
 def test_server_spec_rejects_duplicate_networks():
     with pytest.raises(ValidationError):
         ServerSpec(**_base_spec_dict(networks=["seg1", "seg1"]))
+
+
+# --- NetworkAttachment(静的IP) ---
+
+
+def test_network_attachment_accepts_valid_address_and_gateway():
+    attachment = NetworkAttachment(
+        name="seg1", address="192.168.201.10/24", gateway="192.168.201.1"
+    )
+    assert str(attachment.address) == "192.168.201.10/24"
+    assert str(attachment.gateway) == "192.168.201.1"
+
+
+def test_network_attachment_gateway_defaults_to_none():
+    attachment = NetworkAttachment(name="seg1", address="192.168.201.10/24")
+    assert attachment.gateway is None
+
+
+@pytest.mark.parametrize("value", ["not-an-address", "192.168.201.10/33", ""])
+def test_network_attachment_rejects_invalid_address(value):
+    with pytest.raises(ValidationError):
+        NetworkAttachment(name="seg1", address=value)
+
+
+def test_network_attachment_rejects_invalid_gateway():
+    with pytest.raises(ValidationError):
+        NetworkAttachment(name="seg1", address="192.168.201.10/24", gateway="not-an-ip")
+
+
+def test_network_attachment_rejects_gateway_outside_subnet():
+    with pytest.raises(ValidationError):
+        NetworkAttachment(
+            name="seg1", address="192.168.201.10/24", gateway="192.168.202.1"
+        )
+
+
+def test_network_attachment_serializes_ips_as_strings():
+    attachment = NetworkAttachment(
+        name="seg1", address="192.168.201.10/24", gateway="192.168.201.1"
+    )
+    dumped = attachment.model_dump()
+    assert dumped == {
+        "name": "seg1",
+        "address": "192.168.201.10/24",
+        "gateway": "192.168.201.1",
+    }
+    yaml.safe_dump(dumped)
+
+
+def test_network_attachment_serializes_absent_gateway_as_none():
+    attachment = NetworkAttachment(name="seg1", address="192.168.201.10/24")
+    dumped = attachment.model_dump()
+    assert dumped["gateway"] is None
+
+
+def test_server_spec_accepts_mixed_dhcp_and_static_networks():
+    spec = ServerSpec(
+        **_base_spec_dict(
+            networks=["default", {"name": "seg1", "address": "192.168.201.10/24"}]
+        )
+    )
+    assert spec.networks[0] == "default"
+    assert spec.networks[1] == NetworkAttachment(
+        name="seg1", address="192.168.201.10/24"
+    )
+
+
+def test_server_spec_rejects_duplicate_networks_between_string_and_attachment():
+    with pytest.raises(ValidationError):
+        ServerSpec(
+            **_base_spec_dict(
+                networks=["seg1", {"name": "seg1", "address": "192.168.201.10/24"}]
+            )
+        )
+
+
+def test_server_spec_dump_serializes_static_network_as_string_values():
+    spec = ServerSpec(
+        **_base_spec_dict(networks=[{"name": "seg1", "address": "192.168.201.10/24"}])
+    )
+    dumped = spec.model_dump()
+    assert dumped["networks"] == [
+        {"name": "seg1", "address": "192.168.201.10/24", "gateway": None}
+    ]
+    yaml.safe_dump(dumped)
 
 
 # --- static_routes ---

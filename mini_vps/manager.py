@@ -161,11 +161,29 @@ def _is_managed(dom) -> bool:
     return True
 
 
-def _status_of(dom) -> dict:
-    """VM の状態と IP のスナップショットを返す(IP は待たない)。"""
+def _static_ipv4(spec: dict) -> str | None:
+    """spec["networks"]に静的アドレスを持つNICがあれば最初の1件のIPv4を返す。
+
+    複数NICに静的アドレスがあっても最初の1件のみ(DHCPリース表示の
+    「最初に見つかった1件のみ」という既存方針に合わせる)。
+    """
+    for net in spec.get("networks", []):
+        if isinstance(net, dict) and net.get("address"):
+            return net["address"].split("/", 1)[0]
+    return None
+
+
+def _status_of(dom, spec: dict) -> dict:
+    """VM の状態と IP のスナップショットを返す(IP は待たない)。
+
+    spec に静的アドレスを持つ NIC が1つでもあれば、起動状態に関わらず spec 由来の
+    アドレスを優先表示する(cloud-init が実際に適用したかは確認しない、宣言値の
+    エコー)。無ければ従来通り起動中のときだけ DHCP リースを引く。
+    """
     state = dom.state()[0]
-    # 起動中のときだけリースを引く。それ以外は IP 未確定とみなす
-    ip = _lease_ipv4(dom) if state == libvirt.VIR_DOMAIN_RUNNING else None
+    ip = _static_ipv4(spec)
+    if ip is None and state == libvirt.VIR_DOMAIN_RUNNING:
+        ip = _lease_ipv4(dom)
     return {"state": STATE_NAMES.get(state, "unknown"), "ip": ip}
 
 
@@ -310,7 +328,8 @@ class ServerManager:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
         """
         dom = _lookup(self.conn, name)
-        return {"spec": _read_spec(dom), "status": _status_of(dom)}
+        spec = _read_spec(dom)
+        return {"spec": spec, "status": _status_of(dom, spec)}
 
     def list(self) -> list[str]:
         """管理対象の VM 名の一覧を返す。
@@ -337,7 +356,8 @@ class ServerManager:
         Raises:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
         """
-        return _status_of(_lookup(self.conn, name))
+        dom = _lookup(self.conn, name)
+        return _status_of(dom, _read_spec(dom))
 
     def delete(self, name: str) -> None:
         """管理対象の VM を削除する。

@@ -7,8 +7,12 @@ import yaml
 
 from mini_vps.config import POOL_NAME, POOL_XML
 from mini_vps.resources import (
+    _build_network_config,
     _build_static_routes_fragment,
     _filter_name,
+    _has_static_network,
+    _mac_for_interface,
+    _network_name,
     build_domain_xml,
     build_nwfilter_xml,
     build_seed_iso,
@@ -197,6 +201,99 @@ def test_build_domain_xml_requires_networks_key():
     del spec["networks"]
     with pytest.raises(KeyError):
         build_domain_xml(spec, "/overlay.qcow2", "/seed.iso")
+
+
+def test_build_domain_xml_embeds_deterministic_mac_per_interface():
+    xml = build_domain_xml(
+        _spec(networks=["seg1", "seg2"]), "/overlay.qcow2", "/seed.iso"
+    )
+    mac0 = _mac_for_interface("web-1", 0)
+    mac1 = _mac_for_interface("web-1", 1)
+    assert mac0 != mac1
+    assert f"<mac address='{mac0}'/>" in xml
+    assert f"<mac address='{mac1}'/>" in xml
+
+
+# --- _mac_for_interface / _network_name / _has_static_network ---
+
+
+def test_mac_for_interface_is_deterministic():
+    assert _mac_for_interface("web-1", 0) == _mac_for_interface("web-1", 0)
+
+
+def test_mac_for_interface_differs_by_name_and_index():
+    assert _mac_for_interface("web-1", 0) != _mac_for_interface("web-1", 1)
+    assert _mac_for_interface("web-1", 0) != _mac_for_interface("web-2", 0)
+
+
+def test_mac_for_interface_uses_locally_administered_prefix():
+    assert _mac_for_interface("web-1", 0).startswith("52:54:00:")
+
+
+def test_network_name_extracts_from_string():
+    assert _network_name("seg1") == "seg1"
+
+
+def test_network_name_extracts_from_attachment_dict():
+    assert _network_name({"name": "seg1", "address": "192.168.201.10/24"}) == "seg1"
+
+
+def test_has_static_network_false_for_all_dhcp():
+    assert _has_static_network(_spec(networks=["default", "seg1"])) is False
+
+
+def test_has_static_network_true_when_any_attachment_present():
+    spec = _spec(networks=["default", {"name": "seg1", "address": "192.168.201.10/24"}])
+    assert _has_static_network(spec) is True
+
+
+# --- _build_network_config ---
+
+
+def test_build_network_config_lists_dhcp_and_static_by_mac():
+    spec = _spec(
+        name="web-1",
+        networks=["default", {"name": "seg1", "address": "192.168.201.10/24"}],
+    )
+    config = _build_network_config(spec)
+
+    ethernets = config["network"]["ethernets"]
+    assert config["network"]["version"] == 2
+    assert len(ethernets) == 2
+    dhcp_entry = ethernets["eth0"]
+    static_entry = ethernets["eth1"]
+    assert dhcp_entry == {
+        "match": {"macaddress": _mac_for_interface("web-1", 0)},
+        "dhcp4": True,
+    }
+    assert static_entry["match"] == {"macaddress": _mac_for_interface("web-1", 1)}
+    assert static_entry["addresses"] == ["192.168.201.10/24"]
+
+
+def test_build_network_config_uses_routes_not_gateway4():
+    spec = _spec(
+        name="web-1",
+        networks=[
+            {
+                "name": "seg1",
+                "address": "192.168.201.10/24",
+                "gateway": "192.168.201.1",
+            }
+        ],
+    )
+    config = _build_network_config(spec)
+    entry = config["network"]["ethernets"]["eth0"]
+    assert entry["routes"] == [{"to": "default", "via": "192.168.201.1"}]
+    assert "gateway4" not in entry
+
+
+def test_build_network_config_omits_routes_when_gateway_absent():
+    spec = _spec(
+        name="web-1", networks=[{"name": "seg1", "address": "192.168.201.10/24"}]
+    )
+    config = _build_network_config(spec)
+    entry = config["network"]["ethernets"]["eth0"]
+    assert "routes" not in entry
 
 
 # --- resize_domain_xml ---
@@ -451,8 +548,8 @@ def _seed_pool_mock(monkeypatch, existing_names=()):
 def _fake_run_writes_dummy_iso(cmd, check):
     # subprocess.run はまだ一時ディレクトリが存在するタイミングで呼ばれるため、
     # ここで書き出さないと with ブロックを抜けた時点でファイルごと削除されてしまう。
-    # cmd = ["cloud-localds", iso_path, ud_file_path, md_file_path]
-    Path(cmd[1]).write_bytes(b"dummy-iso-bytes")
+    # cmd の末尾3要素は常に output/user-data/meta-data(-N の有無に依存しない)。
+    Path(cmd[-3]).write_bytes(b"dummy-iso-bytes")
 
 
 def test_build_seed_iso_writes_expected_cloud_init_content(monkeypatch):
@@ -607,3 +704,75 @@ def test_build_seed_iso_propagates_missing_secret_error_before_cloud_localds(
 
     # secrets 不足を検知した時点で失敗するため、cloud-localds は一切呼ばれない
     run_mock.assert_not_called()
+
+
+# --- build_seed_iso: network-config(-N) ---
+
+
+def test_build_seed_iso_omits_dash_n_when_all_networks_are_dhcp(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, check):
+        captured["cmd"] = cmd
+        _fake_run_writes_dummy_iso(cmd, check)
+
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
+    conn = MagicMock()
+    _seed_pool_mock(monkeypatch)
+
+    build_seed_iso(conn, _spec(networks=["default"]), "ssh-ed25519 AAAA...")
+
+    assert "-N" not in captured["cmd"]
+    assert len(captured["cmd"]) == 4
+
+
+def test_build_seed_iso_passes_dash_n_and_network_config_when_static_present(
+    monkeypatch,
+):
+    captured = {}
+
+    def fake_run(cmd, check):
+        captured["cmd"] = cmd
+        nc_index = cmd.index("-N") + 1
+        captured["network_config"] = yaml.safe_load(Path(cmd[nc_index]).read_text())
+        _fake_run_writes_dummy_iso(cmd, check)
+
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
+    conn = MagicMock()
+    _seed_pool_mock(monkeypatch)
+
+    spec = _spec(
+        name="web-1",
+        networks=[{"name": "seg1", "address": "192.168.201.10/24"}],
+    )
+    build_seed_iso(conn, spec, "ssh-ed25519 AAAA...")
+
+    assert "-N" in captured["cmd"]
+    # output/user-data/meta-data は -N があっても常に末尾3要素であること
+    assert captured["cmd"][0] == "cloud-localds"
+    assert len(captured["cmd"]) == 6
+    assert captured["network_config"] == _build_network_config(spec)
+
+
+def test_build_seed_iso_network_config_covers_all_nics_including_dhcp(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, check):
+        nc_index = cmd.index("-N") + 1
+        captured["network_config"] = yaml.safe_load(Path(cmd[nc_index]).read_text())
+        _fake_run_writes_dummy_iso(cmd, check)
+
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
+    conn = MagicMock()
+    _seed_pool_mock(monkeypatch)
+
+    spec = _spec(
+        name="web-1",
+        networks=["default", {"name": "seg1", "address": "192.168.201.10/24"}],
+    )
+    build_seed_iso(conn, spec, "ssh-ed25519 AAAA...")
+
+    ethernets = captured["network_config"]["network"]["ethernets"]
+    assert len(ethernets) == 2
+    assert ethernets["eth0"]["dhcp4"] is True
+    assert ethernets["eth1"]["addresses"] == ["192.168.201.10/24"]
