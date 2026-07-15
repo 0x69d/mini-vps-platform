@@ -59,6 +59,24 @@ def test_ensure_network_active_requires_networks_key():
         ensure_network_active(conn, {})
 
 
+def test_ensure_network_active_handles_network_attachment_elements():
+    conn = MagicMock()
+    nets = {"default": MagicMock(), "seg1": MagicMock()}
+    nets["default"].isActive.return_value = False
+    nets["seg1"].isActive.return_value = False
+    conn.networkLookupByName.side_effect = lambda name: nets[name]
+
+    ensure_network_active(
+        conn,
+        {"networks": ["default", {"name": "seg1", "address": "192.168.201.10/24"}]},
+    )
+
+    conn.networkLookupByName.assert_any_call("default")
+    conn.networkLookupByName.assert_any_call("seg1")
+    nets["default"].create.assert_called_once()
+    nets["seg1"].create.assert_called_once()
+
+
 # --- provision ---
 
 

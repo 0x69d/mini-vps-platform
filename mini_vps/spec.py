@@ -52,6 +52,28 @@ class StaticRoute(BaseModel):
         return str(value)
 
 
+class NetworkAttachment(BaseModel):
+    """静的IPで結線するNIC1件(ネットワーク名・アドレス・任意のゲートウェイ)。
+
+    gateway/address 間のサブネット整合性は検証しない。StaticRoute.via と同様、
+    運用者が決め打ちで指定する値として扱う。
+    """
+
+    name: _NetworkName
+    address: ipaddress.IPv4Interface
+    gateway: ipaddress.IPv4Address | None = None
+
+    @field_serializer("address")
+    def _serialize_address(self, value: ipaddress.IPv4Interface) -> str:
+        """metadata永続化(yaml.safe_dump)向けに文字列化する。"""
+        return str(value)
+
+    @field_serializer("gateway")
+    def _serialize_gateway(self, value: ipaddress.IPv4Address | None) -> str | None:
+        """metadata永続化(yaml.safe_dump)向けに文字列化する。"""
+        return str(value) if value is not None else None
+
+
 class ServerSpecInput(BaseModel):
     """name を含まない VM スペック入力。
 
@@ -65,7 +87,7 @@ class ServerSpecInput(BaseModel):
     disk: int = Field(gt=0)
     hostname: str | None = Field(default=None, pattern=_NAME_PATTERN)
     user: str = Field(default="ubuntu", pattern=_USERNAME_PATTERN)
-    networks: list[_NetworkName] = Field(
+    networks: list[_NetworkName | NetworkAttachment] = Field(
         default_factory=lambda: ["default"], min_length=1
     )
     # None: フィルタ無し(全許可)。[]: 意図的な全 inbound 拒否。
@@ -78,9 +100,10 @@ class ServerSpecInput(BaseModel):
 
     @model_validator(mode="after")
     def _validate_networks_unique(self) -> ServerSpecInput:
-        """同一ネットワークへの重複所属を検証する(設定ミスの可能性が高いため拒否する)。"""
-        if len(self.networks) != len(set(self.networks)):
-            raise ValueError(f"networks に重複があります: {self.networks!r}")
+        """同一ネットワークへの重複所属をネットワーク名で検証する(設定ミスの可能性が高いため拒否する)。"""
+        names = [n if isinstance(n, str) else n.name for n in self.networks]
+        if len(names) != len(set(names)):
+            raise ValueError(f"networks に重複があります: {names!r}")
         return self
 
     @model_validator(mode="after")

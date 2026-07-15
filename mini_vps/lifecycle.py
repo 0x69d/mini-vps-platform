@@ -7,6 +7,7 @@ import libvirt
 from .config import POOL_NAME, SEED_POOL_NAME
 from .resources import (
     _filter_name,
+    _network_name,
     build_domain_xml,
     build_nwfilter_xml,
     build_seed_iso,
@@ -18,7 +19,7 @@ from .spec import read_pubkey
 def ensure_network_active(conn, spec) -> None:
     """VM スペックが参照する networks それぞれについて、非アクティブなら起動する。"""
     for network in spec["networks"]:
-        net = conn.networkLookupByName(network)
+        net = conn.networkLookupByName(_network_name(network))
         if not net.isActive():
             net.create()
 
