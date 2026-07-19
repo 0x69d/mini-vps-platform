@@ -194,6 +194,9 @@ systemd-resolved がリゾルバとして使う(`resolvectl status` で確認で
 (DHCPのNICはDHCPオプションでリゾルバを受ける)。内部DNS(dns-1)を参照するVMは
 静的IP + `nameservers` 指定が前提の運用規約とする。
 
+VM 作成/削除時に A/PTR レコードを内部DNSへ自動登録する opt-in 機能もある
+([docs/dns-registration.md](docs/dns-registration.md) 参照)。
+
 **`status`/`get` のIP表示**: 静的アドレスを持つNICが1つでもあれば、VMの起動状態に
 関わらずそれを(宣言値として)優先表示する。cloud-initが実際に適用したかは確認しない。
 静的アドレスが無ければ従来通り起動中のみDHCPリースを表示する。いずれの場合も複数NIC

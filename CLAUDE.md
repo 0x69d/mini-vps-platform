@@ -41,6 +41,8 @@ spec(YAML/JSON) → parse → XML → libvirt define/start という一方向の
   spec は libvirt `<metadata>` に埋め込み、自前 DB を持たない。
   例外 `ServerNotFound`/`ServerConflict`/`ServerNotRunning`。
 - **`lifecycle.py`** — `provision` / `teardown` / `wait_for_ip` / `ensure_network_active`。
+- **`dns_registration.py`** — nsupdate subprocess による A/PTR の自動登録(opt-in・ベストエフォート、
+  manager の create/delete/reinstall から呼ばれ例外を伝播させない。`docs/dns-registration.md` 参照)。
 - **`resources.py`** — pool / overlay volume / seed ISO / domain XML / nwfilter XML の生成。
   純粋関数(`build_domain_xml`・`build_nwfilter_xml`・`_filter_name`)と、libvirt/subprocess を伴う関数が同居。
 - **`config.py`** — 定数(`LIBVIRT_URI` 含む)と XML/cloud-init テンプレート。
