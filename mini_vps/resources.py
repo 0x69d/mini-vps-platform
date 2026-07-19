@@ -67,7 +67,9 @@ def _build_network_config(spec) -> dict:
     cloud-init に渡すとそれが唯一の設定源になり、記載の無いNICは一切設定されなく
     なるため、DHCPの文字列要素も含めて全NICをMACマッチで列挙する。gatewayが
     指定されている場合のみ default route を追加する(netplan v2では非推奨の
-    gateway4ではなく routes: [{to: default, via: ...}] を使う)。
+    gateway4ではなく routes: [{to: default, via: ...}] を使う)。nameservers /
+    search も非空の場合のみ netplan v2 の nameservers に出力する(DHCPのNICは
+    DHCPオプションでリゾルバを受けるため対象外)。
     """
     ethernets = {}
     for index, net in enumerate(spec["networks"]):
@@ -79,6 +81,13 @@ def _build_network_config(spec) -> dict:
             entry = {"match": {"macaddress": mac}, "addresses": [net["address"]]}
             if net.get("gateway"):
                 entry["routes"] = [{"to": "default", "via": net["gateway"]}]
+            nameservers = {}
+            if net.get("nameservers"):
+                nameservers["addresses"] = net["nameservers"]
+            if net.get("search"):
+                nameservers["search"] = net["search"]
+            if nameservers:
+                entry["nameservers"] = nameservers
             ethernets[iface_key] = entry
     return {"network": {"version": 2, "ethernets": ethernets}}
 

@@ -19,6 +19,7 @@ from mini_vps.manager import (
     _write_spec,
     register_quiet_error_handler,
 )
+from mini_vps.spec import ServerSpec
 
 # --- register_quiet_error_handler ---
 
@@ -212,10 +213,12 @@ def _full_spec(**overrides):
 def test_create_is_idempotent_when_spec_matches(monkeypatch):
     conn = MagicMock()
     mgr = ServerManager(conn)
-    spec = {"name": "web-1"}
+    # 実運用の create は load_spec()(= ServerSpec の model_dump)を受け取るため、
+    # metadata との比較も完全な dump 形で行う。
+    spec = ServerSpec(**_full_spec()).model_dump()
     monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: MagicMock())
     monkeypatch.setattr("mini_vps.manager._is_managed", lambda dom: True)
-    monkeypatch.setattr("mini_vps.manager._read_spec", lambda dom: spec)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda dom: dict(spec))
     provision_mock = MagicMock()
     monkeypatch.setattr("mini_vps.manager.provision", provision_mock)
     mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
@@ -225,6 +228,33 @@ def test_create_is_idempotent_when_spec_matches(monkeypatch):
     assert created is False
     provision_mock.assert_not_called()
     assert result == mgr.get.return_value
+
+
+def test_create_is_idempotent_when_metadata_lacks_new_fields(monkeypatch):
+    """フィールド追加前の metadata(nameservers/search 無し)でも冪等 no-op になる。
+
+    create() は metadata の spec を ServerSpec で正規化して比較するため、
+    後からフィールドが増えても既存 VM の再 create が ServerConflict にならない。
+    """
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    old_metadata = _full_spec(
+        networks=[{"name": "seg1", "address": "192.168.201.10/24", "gateway": None}]
+    )
+    spec = ServerSpec(
+        **_full_spec(networks=[{"name": "seg1", "address": "192.168.201.10/24"}])
+    ).model_dump()
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: MagicMock())
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda dom: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda dom: old_metadata)
+    provision_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager.provision", provision_mock)
+    mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
+
+    result, created = mgr.create(spec)
+
+    assert created is False
+    provision_mock.assert_not_called()
 
 
 def test_create_raises_conflict_when_spec_differs(monkeypatch):

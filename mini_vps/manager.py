@@ -20,7 +20,7 @@ from .resources import (
     resize_domain_xml,
     set_domain_filterref_xml,
 )
-from .spec import read_pubkey
+from .spec import ServerSpec, read_pubkey
 
 # create() が停止中の既存 VM に対して収束(defineXML の最小差分編集)を許す
 # フィールド。それ以外のフィールドの差分は ServerConflict で拒否する。
@@ -260,7 +260,10 @@ class ServerManager:
             if not _is_managed(existing):
                 raise ServerConflict(name)
 
-            old_spec = _read_spec(existing)
+            # metadata の spec はフィールド追加前の版で書かれている可能性がある
+            # (例: nameservers 追加前に作った VM)。Pydantic を通して欠落フィールドに
+            # デフォルトを補完し、同じ YAML の再 create が差分扱いにならないようにする。
+            old_spec = ServerSpec(**_read_spec(existing)).model_dump()
             if old_spec == spec:
                 return self.get(name), False
 

@@ -296,6 +296,60 @@ def test_build_network_config_omits_routes_when_gateway_absent():
     assert "routes" not in entry
 
 
+def test_build_network_config_includes_nameservers_when_set():
+    spec = _spec(
+        name="web-1",
+        networks=[
+            {
+                "name": "seg1",
+                "address": "192.168.201.10/24",
+                "nameservers": ["192.168.203.30"],
+                "search": ["minivps.internal"],
+            }
+        ],
+    )
+    config = _build_network_config(spec)
+    entry = config["network"]["ethernets"]["eth0"]
+    assert entry["nameservers"] == {
+        "addresses": ["192.168.203.30"],
+        "search": ["minivps.internal"],
+    }
+
+
+def test_build_network_config_omits_nameservers_when_empty():
+    spec = _spec(
+        name="web-1",
+        networks=[
+            {
+                "name": "seg1",
+                "address": "192.168.201.10/24",
+                "nameservers": [],
+                "search": [],
+            }
+        ],
+    )
+    config = _build_network_config(spec)
+    entry = config["network"]["ethernets"]["eth0"]
+    assert "nameservers" not in entry
+
+
+def test_build_network_config_includes_search_without_addresses():
+    spec = _spec(
+        name="web-1",
+        networks=[
+            {
+                "name": "seg1",
+                "address": "192.168.201.10/24",
+                "nameservers": [],
+                "search": ["minivps.internal"],
+            }
+        ],
+    )
+    config = _build_network_config(spec)
+    entry = config["network"]["ethernets"]["eth0"]
+    assert entry["nameservers"] == {"search": ["minivps.internal"]}
+
+
 # --- resize_domain_xml ---
 
 # dom.XMLDesc(VIR_DOMAIN_XML_INACTIVE) が返す実定義を模したフィクスチャ。
@@ -776,3 +830,35 @@ def test_build_seed_iso_network_config_covers_all_nics_including_dhcp(monkeypatc
     assert len(ethernets) == 2
     assert ethernets["eth0"]["dhcp4"] is True
     assert ethernets["eth1"]["addresses"] == ["192.168.201.10/24"]
+
+
+def test_build_seed_iso_network_config_contains_nameservers(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, check):
+        nc_index = cmd.index("-N") + 1
+        captured["network_config"] = yaml.safe_load(Path(cmd[nc_index]).read_text())
+        _fake_run_writes_dummy_iso(cmd, check)
+
+    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
+    conn = MagicMock()
+    _seed_pool_mock(monkeypatch)
+
+    spec = _spec(
+        name="web-1",
+        networks=[
+            {
+                "name": "seg1",
+                "address": "192.168.201.10/24",
+                "nameservers": ["192.168.203.30"],
+                "search": ["minivps.internal"],
+            }
+        ],
+    )
+    build_seed_iso(conn, spec, "ssh-ed25519 AAAA...")
+
+    entry = captured["network_config"]["network"]["ethernets"]["eth0"]
+    assert entry["nameservers"] == {
+        "addresses": ["192.168.203.30"],
+        "search": ["minivps.internal"],
+    }

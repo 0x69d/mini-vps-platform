@@ -32,6 +32,17 @@ _USERNAME_PATTERN = r"^[a-z_][a-z0-9_-]{0,31}$"
 # networks の要素用。_NAME_PATTERN と同じ文字種制約を list の各要素に適用する。
 _NetworkName = Annotated[str, StringConstraints(pattern=_NAME_PATTERN)]
 
+# NetworkAttachment.search の要素用。netplan の nameservers.search へ yaml.safe_dump
+# 経由で埋め込むドメイン名。DNS の search ドメインは慣例上アンダースコアを含まない
+# ため _NAME_PATTERN は流用せず、RFC 1123 のホスト名ラベル(英数字始まり・ハイフン可・
+# 63文字以内)をドットで連結した形のみ許す(例: "minivps.internal")。
+_SEARCH_DOMAIN_PATTERN = (
+    r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62})?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,62})?)*$"
+)
+_SearchDomain = Annotated[
+    str, StringConstraints(pattern=_SEARCH_DOMAIN_PATTERN, max_length=253)
+]
+
 
 class FilterRule(BaseModel):
     """inbound 許可ルール1件(単一ポート・単一プロトコル)。"""
@@ -53,16 +64,23 @@ class StaticRoute(BaseModel):
 
 
 class NetworkAttachment(BaseModel):
-    """静的IPで結線するNIC1件(ネットワーク名・アドレス・任意のゲートウェイ)。
+    """静的IPで結線するNIC1件(ネットワーク名・アドレス・任意のゲートウェイ・DNS設定)。
 
     gateway は address のサブネット内にあることを検証する(同一NIC・同一セグメント内で
     あるべき値のため)。StaticRoute.via(次ホップ)とは異なり、運用者の決め打ちに
     委ねる対象ではない。
+
+    nameservers にはサブネット内検証を掛けない(gateway と異なり、ルータVM越しの
+    別セグメントに立つDNSサーバのIPが正当な値のため)。search は netplan の
+    nameservers.search に渡す検索ドメインのリスト。いずれも空なら network-config に
+    nameservers キー自体を出力しない。
     """
 
     name: _NetworkName
     address: ipaddress.IPv4Interface
     gateway: ipaddress.IPv4Address | None = None
+    nameservers: list[ipaddress.IPv4Address] = Field(default_factory=list)
+    search: list[_SearchDomain] = Field(default_factory=list)
 
     @field_serializer("address")
     def _serialize_address(self, value: ipaddress.IPv4Interface) -> str:
@@ -73,6 +91,11 @@ class NetworkAttachment(BaseModel):
     def _serialize_gateway(self, value: ipaddress.IPv4Address | None) -> str | None:
         """metadata永続化(yaml.safe_dump)向けに文字列化する。"""
         return str(value) if value is not None else None
+
+    @field_serializer("nameservers")
+    def _serialize_nameservers(self, value: list[ipaddress.IPv4Address]) -> list[str]:
+        """metadata永続化(yaml.safe_dump)向けに文字列化する。"""
+        return [str(v) for v in value]
 
     @model_validator(mode="after")
     def _validate_gateway_in_subnet(self) -> NetworkAttachment:
