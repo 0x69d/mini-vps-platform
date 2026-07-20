@@ -194,6 +194,8 @@ def test_network_attachment_serializes_ips_as_strings():
         "name": "seg1",
         "address": "192.168.201.10/24",
         "gateway": "192.168.201.1",
+        "nameservers": [],
+        "search": [],
     }
     yaml.safe_dump(dumped)
 
@@ -202,6 +204,59 @@ def test_network_attachment_serializes_absent_gateway_as_none():
     attachment = NetworkAttachment(name="seg1", address="192.168.201.10/24")
     dumped = attachment.model_dump()
     assert dumped["gateway"] is None
+
+
+def test_network_attachment_nameservers_and_search_default_to_empty():
+    attachment = NetworkAttachment(name="seg1", address="192.168.201.10/24")
+    assert attachment.nameservers == []
+    assert attachment.search == []
+
+
+def test_network_attachment_accepts_nameservers_and_search():
+    attachment = NetworkAttachment(
+        name="seg1",
+        address="192.168.201.10/24",
+        nameservers=["192.168.203.30"],
+        search=["minivps.internal"],
+    )
+    assert [str(ns) for ns in attachment.nameservers] == ["192.168.203.30"]
+    assert attachment.search == ["minivps.internal"]
+
+
+@pytest.mark.parametrize("value", ["not-an-ip", "192.168.203.0/24", ""])
+def test_network_attachment_rejects_invalid_nameserver(value):
+    with pytest.raises(ValidationError):
+        NetworkAttachment(name="seg1", address="192.168.201.10/24", nameservers=[value])
+
+
+@pytest.mark.parametrize(
+    "value", ["a b", "-x.internal", "a..b", "a/b", ".internal", "x" * 254]
+)
+def test_network_attachment_rejects_invalid_search_domain(value):
+    with pytest.raises(ValidationError):
+        NetworkAttachment(name="seg1", address="192.168.201.10/24", search=[value])
+
+
+def test_network_attachment_allows_offsubnet_nameserver():
+    # gateway と異なり、nameservers はルータ越しの別セグメントIPが正当な値のため
+    # サブネット内検証を掛けない(回帰防止)。
+    attachment = NetworkAttachment(
+        name="seg1", address="192.168.201.10/24", nameservers=["192.168.203.30"]
+    )
+    assert [str(ns) for ns in attachment.nameservers] == ["192.168.203.30"]
+
+
+def test_network_attachment_serializes_nameservers_as_strings():
+    attachment = NetworkAttachment(
+        name="seg1",
+        address="192.168.201.10/24",
+        nameservers=["192.168.203.30", "192.168.122.30"],
+        search=["minivps.internal"],
+    )
+    dumped = attachment.model_dump()
+    assert dumped["nameservers"] == ["192.168.203.30", "192.168.122.30"]
+    assert dumped["search"] == ["minivps.internal"]
+    yaml.safe_dump(dumped)
 
 
 def test_server_spec_accepts_mixed_dhcp_and_static_networks():
@@ -231,7 +286,13 @@ def test_server_spec_dump_serializes_static_network_as_string_values():
     )
     dumped = spec.model_dump()
     assert dumped["networks"] == [
-        {"name": "seg1", "address": "192.168.201.10/24", "gateway": None}
+        {
+            "name": "seg1",
+            "address": "192.168.201.10/24",
+            "gateway": None,
+            "nameservers": [],
+            "search": [],
+        }
     ]
     yaml.safe_dump(dumped)
 

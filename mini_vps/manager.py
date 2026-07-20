@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 import libvirt
 import yaml
 
+from . import dns_registration
 from .config import METADATA_KEY, METADATA_NS
 from .lifecycle import _lease_ipv4, ensure_network_active, provision, teardown
 from .resources import (
@@ -20,7 +21,7 @@ from .resources import (
     resize_domain_xml,
     set_domain_filterref_xml,
 )
-from .spec import read_pubkey
+from .spec import ServerSpec, read_pubkey
 
 # create() が停止中の既存 VM に対して収束(defineXML の最小差分編集)を許す
 # フィールド。それ以外のフィールドの差分は ServerConflict で拒否する。
@@ -236,6 +237,9 @@ class ServerManager:
         secrets(startup_script テンプレートに渡す秘密情報)は provision() にのみ
         渡し、_write_spec()(=libvirt metadata)には渡さない。
 
+        新規作成成功後は DNS レコードをベストエフォートで登録する
+        (opt-in、失敗しても create は成功する。docs/dns-registration.md 参照)。
+
         Returns:
             (result, created) のタプル。result は spec と status をキーに持つ dict。
             created は新規作成なら True、既存一致の冪等 no-op・収束なら False。
@@ -255,12 +259,19 @@ class ServerManager:
                 except Exception:
                     teardown(self.conn, {"name": name})
                     raise
+                # DNS 登録は VM 作成成功が確定した後(try/except の外)で行う。
+                # register は例外を送出しない契約(ベストエフォート)だが、
+                # 仮に失敗しても teardown 巻き戻しを誘発しない位置に置く。
+                dns_registration.register(spec)
                 return self.get(name), True
 
             if not _is_managed(existing):
                 raise ServerConflict(name)
 
-            old_spec = _read_spec(existing)
+            # metadata の spec はフィールド追加前の版で書かれている可能性がある
+            # (例: nameservers 追加前に作った VM)。Pydantic を通して欠落フィールドに
+            # デフォルトを補完し、同じ YAML の再 create が差分扱いにならないようにする。
+            old_spec = ServerSpec(**_read_spec(existing)).model_dump()
             if old_spec == spec:
                 return self.get(name), False
 
@@ -363,14 +374,21 @@ class ServerManager:
         """管理対象の VM を削除する。
 
         未管理(または不在)の name は削除せず ServerNotFound で拒否する。
+        削除成功後は DNS レコードをベストエフォートで削除する
+        (opt-in、失敗しても delete は成功する。docs/dns-registration.md 参照)。
 
         Raises:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
         """
         # create と同じ name ロックで直列化し、作成途中の VM への delete 競合を防ぐ
         with self._lock_for(name):
-            _lookup(self.conn, name)
+            dom = _lookup(self.conn, name)
+            # DNS レコードの削除に使う IP は teardown で metadata ごと消える前に
+            # 読んでおく。unregister は teardown 成功後にのみ呼ぶ(teardown が
+            # 失敗した=VM が残っているのに名前だけ消える事故を防ぐ)。
+            spec = _read_spec(dom)
             teardown(self.conn, {"name": name})
+            dns_registration.unregister(spec)
 
     def start(self, name: str) -> dict:
         """管理対象の VM を起動する。
@@ -454,6 +472,10 @@ class ServerManager:
         テンプレートを再度効かせたい場合は呼び出しのたびに secrets を
         渡し直す必要がある。
 
+        起動成功後は DNS レコードをベストエフォートで再登録する(冪等な
+        delete→add の組なので無害。DNS 有効化前に作った VM のレコードを
+        後追い補充する復旧手段を兼ねる。docs/dns-registration.md 参照)。
+
         Returns:
             spec と status をキーに持つ dict。
 
@@ -474,4 +496,8 @@ class ServerManager:
             ensure_network_active(self.conn, spec)
             dom.create()
 
+            # spec(name/IP)は不変なので既存レコードと同値の再登録になるが、
+            # register は delete→add の冪等な組であり無害。DNS 有効化前に
+            # 作った VM のレコードを後追い補充する復旧手段としても機能する。
+            dns_registration.register(spec)
             return self.get(name)

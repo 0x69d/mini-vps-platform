@@ -19,6 +19,7 @@ from mini_vps.manager import (
     _write_spec,
     register_quiet_error_handler,
 )
+from mini_vps.spec import ServerSpec
 
 # --- register_quiet_error_handler ---
 
@@ -212,10 +213,12 @@ def _full_spec(**overrides):
 def test_create_is_idempotent_when_spec_matches(monkeypatch):
     conn = MagicMock()
     mgr = ServerManager(conn)
-    spec = {"name": "web-1"}
+    # 実運用の create は load_spec()(= ServerSpec の model_dump)を受け取るため、
+    # metadata との比較も完全な dump 形で行う。
+    spec = ServerSpec(**_full_spec()).model_dump()
     monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: MagicMock())
     monkeypatch.setattr("mini_vps.manager._is_managed", lambda dom: True)
-    monkeypatch.setattr("mini_vps.manager._read_spec", lambda dom: spec)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda dom: dict(spec))
     provision_mock = MagicMock()
     monkeypatch.setattr("mini_vps.manager.provision", provision_mock)
     mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
@@ -225,6 +228,33 @@ def test_create_is_idempotent_when_spec_matches(monkeypatch):
     assert created is False
     provision_mock.assert_not_called()
     assert result == mgr.get.return_value
+
+
+def test_create_is_idempotent_when_metadata_lacks_new_fields(monkeypatch):
+    """フィールド追加前の metadata(nameservers/search 無し)でも冪等 no-op になる。
+
+    create() は metadata の spec を ServerSpec で正規化して比較するため、
+    後からフィールドが増えても既存 VM の再 create が ServerConflict にならない。
+    """
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    old_metadata = _full_spec(
+        networks=[{"name": "seg1", "address": "192.168.201.10/24", "gateway": None}]
+    )
+    spec = ServerSpec(
+        **_full_spec(networks=[{"name": "seg1", "address": "192.168.201.10/24"}])
+    ).model_dump()
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: MagicMock())
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda dom: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda dom: old_metadata)
+    provision_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager.provision", provision_mock)
+    mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
+
+    result, created = mgr.create(spec)
+
+    assert created is False
+    provision_mock.assert_not_called()
 
 
 def test_create_raises_conflict_when_spec_differs(monkeypatch):
@@ -665,6 +695,7 @@ def test_delete_tears_down_managed_server(monkeypatch):
     conn = MagicMock()
     mgr = ServerManager(conn)
     monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: MagicMock())
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: {"name": "web-1"})
     teardown_mock = MagicMock()
     monkeypatch.setattr("mini_vps.manager.teardown", teardown_mock)
 
@@ -953,3 +984,148 @@ def test_reinstall_forwards_secrets_to_build_seed_iso(monkeypatch):
     build_seed_mock.assert_called_once_with(
         conn, spec, "ssh-ed25519 AAAA", secrets=secrets
     )
+
+
+# --- DNS 自動登録フック(dns_registration との連携) ---
+
+
+def _dns_mocks(monkeypatch):
+    register_mock = MagicMock()
+    unregister_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager.dns_registration.register", register_mock)
+    monkeypatch.setattr("mini_vps.manager.dns_registration.unregister", unregister_mock)
+    return register_mock, unregister_mock
+
+
+def test_create_registers_dns_after_new_provision(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    spec = {"name": "web-1"}
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: None)
+    monkeypatch.setattr("mini_vps.manager.provision", MagicMock(return_value=dom))
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    register_mock, _ = _dns_mocks(monkeypatch)
+    mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
+
+    mgr.create(spec)
+
+    register_mock.assert_called_once_with(spec)
+
+
+def test_create_skips_dns_on_idempotent_noop(monkeypatch):
+    """spec 一致の no-op では IP が変わる余地が無いため DNS 登録しない。"""
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    spec = ServerSpec(**_full_spec()).model_dump()
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: MagicMock())
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda dom: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda dom: dict(spec))
+    register_mock, _ = _dns_mocks(monkeypatch)
+    mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
+
+    mgr.create(spec)
+
+    register_mock.assert_not_called()
+
+
+def test_create_skips_dns_on_converge(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    dom.XMLDesc.return_value = "<domain/>"
+    new_dom = MagicMock()
+    conn.defineXML.return_value = new_dom
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: _full_spec())
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    monkeypatch.setattr(
+        "mini_vps.manager.resize_domain_xml", MagicMock(return_value="<domain/>")
+    )
+    register_mock, _ = _dns_mocks(monkeypatch)
+    new_spec = _full_spec(memory=2048)
+    mgr.get = MagicMock(return_value={"spec": new_spec, "status": {}})
+
+    mgr.create(new_spec)
+
+    register_mock.assert_not_called()
+
+
+def test_create_skips_dns_when_provision_fails(monkeypatch):
+    """ロールバック経路(teardown 巻き戻し)では DNS 登録しない。"""
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: None)
+    monkeypatch.setattr(
+        "mini_vps.manager.provision", MagicMock(side_effect=RuntimeError("boom"))
+    )
+    monkeypatch.setattr("mini_vps.manager.teardown", MagicMock())
+    register_mock, _ = _dns_mocks(monkeypatch)
+
+    with pytest.raises(RuntimeError):
+        mgr.create({"name": "web-1"})
+
+    register_mock.assert_not_called()
+
+
+def test_delete_unregisters_with_spec_read_before_teardown(monkeypatch):
+    """delete は teardown 前に読んだ spec で、teardown 成功後に unregister する。"""
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    spec = {"name": "web-1", "networks": []}
+    calls = []
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: MagicMock())
+    monkeypatch.setattr(
+        "mini_vps.manager._read_spec",
+        lambda d: calls.append("read_spec") or spec,
+    )
+    monkeypatch.setattr(
+        "mini_vps.manager.teardown", lambda c, s: calls.append("teardown")
+    )
+    monkeypatch.setattr(
+        "mini_vps.manager.dns_registration.unregister",
+        lambda s: calls.append(("unregister", s)),
+    )
+
+    mgr.delete("web-1")
+
+    assert calls == ["read_spec", "teardown", ("unregister", spec)]
+
+
+def test_delete_skips_unregister_when_teardown_fails(monkeypatch):
+    """teardown 失敗時(VM が残っている)は名前だけ消さない。"""
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: MagicMock())
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: {"name": "web-1"})
+    monkeypatch.setattr(
+        "mini_vps.manager.teardown", MagicMock(side_effect=RuntimeError("boom"))
+    )
+    _, unregister_mock = _dns_mocks(monkeypatch)
+
+    with pytest.raises(RuntimeError):
+        mgr.delete("web-1")
+
+    unregister_mock.assert_not_called()
+
+
+def test_reinstall_registers_dns(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    spec = {"name": "web-1"}
+    monkeypatch.setattr("mini_vps.manager._lookup", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: spec)
+    monkeypatch.setattr("mini_vps.manager.read_pubkey", lambda: "ssh-ed25519 AAAA")
+    monkeypatch.setattr("mini_vps.manager.build_seed_iso", MagicMock())
+    monkeypatch.setattr("mini_vps.manager.create_overlay_volume", MagicMock())
+    monkeypatch.setattr("mini_vps.manager.ensure_network_active", MagicMock())
+    register_mock, _ = _dns_mocks(monkeypatch)
+    mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
+
+    mgr.reinstall("web-1")
+
+    register_mock.assert_called_once_with(spec)
