@@ -25,3 +25,13 @@ network_segments:
     netmask: 255.255.255.0
     dhcp_start: 192.168.203.2
     dhcp_end: 192.168.203.254
+  # seg4 は minivps-k8s-appliance のK8sクラスタ専用セグメント。
+  # DHCPレンジを .200-.254 に狭め、.2-.199 をクラスタノードの静的IP
+  # (cp=.10, worker=.21〜)用に空けてある(seg1-3のような全域DHCPだと
+  # 静的IPとリースが衝突しうるため)。
+  - name: seg4
+    bridge: virbr-seg4
+    gateway: 192.168.204.1
+    netmask: 255.255.255.0
+    dhcp_start: 192.168.204.200
+    dhcp_end: 192.168.204.254
