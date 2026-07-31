@@ -1,5 +1,6 @@
 import contextlib
 import json
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -46,6 +47,68 @@ def test_parse_startup_params_keeps_first_only_split():
 def test_parse_startup_params_rejects_missing_equals():
     with pytest.raises(StartupScriptError):
         cli._parse_startup_params(["NOVALUE"])
+
+
+# --- ログ設定 ---
+
+
+@pytest.fixture
+def captured_log_level(monkeypatch):
+    """cli が configure_logging に渡したレベルを記録する。"""
+    captured = {}
+    monkeypatch.setattr(
+        cli, "configure_logging", lambda level: captured.update(level=level)
+    )
+    return captured
+
+
+def test_no_verbose_flag_leaves_level_to_environment(mock_manager, captured_log_level):
+    """-v 無しでは明示レベルを渡さず、環境変数と既定値の判断に委ねる。"""
+    mock_manager.list.return_value = []
+
+    cli.main(["list"], manager_factory=_factory(mock_manager))
+
+    assert captured_log_level["level"] is None
+
+
+def test_single_verbose_selects_info(mock_manager, captured_log_level):
+    mock_manager.list.return_value = []
+
+    cli.main(["-v", "list"], manager_factory=_factory(mock_manager))
+
+    assert captured_log_level["level"] == "INFO"
+
+
+def test_double_verbose_selects_debug(mock_manager, captured_log_level):
+    mock_manager.list.return_value = []
+
+    cli.main(["-vv", "list"], manager_factory=_factory(mock_manager))
+
+    assert captured_log_level["level"] == "DEBUG"
+
+
+def test_logs_go_to_stderr_not_stdout(mock_manager, capsys):
+    """-v を付けても stdout はコマンド結果だけを保ち、ログは stderr へ流す。"""
+
+    def _list():
+        logging.getLogger("mini_vps.manager").info("診断メッセージ")
+        return ["web-1"]
+
+    mock_manager.list.side_effect = _list
+
+    logger = logging.getLogger("mini_vps")
+    saved_handlers, saved_level = list(logger.handlers), logger.level
+    logger.handlers[:] = []
+    try:
+        exit_code = cli.main(["-v", "list"], manager_factory=_factory(mock_manager))
+    finally:
+        logger.handlers[:] = saved_handlers
+        logger.setLevel(saved_level)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == "web-1\n"
+    assert "診断メッセージ" in captured.err
 
 
 # --- list ---

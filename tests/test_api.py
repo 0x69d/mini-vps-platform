@@ -257,3 +257,17 @@ def test_reinstall_server_forwards_secrets_from_body(client):
     mock_manager.reinstall.assert_called_once_with(
         "web-1", secrets={"AI_ENGINE_TOKEN": "sk-abc"}
     )
+
+
+def test_lifespan_configures_logging(monkeypatch):
+    """入口層としてのログ設定が lifespan で行われることを確認する。"""
+    captured = []
+    monkeypatch.setattr("mini_vps.api.libvirt.open", lambda uri: MagicMock())
+    monkeypatch.setattr(
+        "mini_vps.api.configure_logging", lambda *a, **kw: captured.append(True)
+    )
+
+    with TestClient(api_module.app):
+        pass
+
+    assert captured == [True]

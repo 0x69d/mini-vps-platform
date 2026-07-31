@@ -80,6 +80,60 @@ def test_ensure_network_active_handles_network_attachment_elements():
 # --- provision ---
 
 
+def test_provision_logs_each_stage(monkeypatch, caplog):
+    """5段階のどこまで進んだかを追えることが、ログを入れる最大の目的。"""
+    conn = MagicMock()
+    spec = {"name": "web-1", "filters": [{"port": 22, "protocol": "tcp"}]}
+    monkeypatch.setattr("mini_vps.lifecycle.ensure_network_active", MagicMock())
+    monkeypatch.setattr("mini_vps.lifecycle.build_nwfilter_xml", lambda s: "<filter/>")
+    monkeypatch.setattr("mini_vps.lifecycle._filter_name", lambda s: "minivps-web-1")
+    monkeypatch.setattr(
+        "mini_vps.lifecycle.create_overlay_volume", lambda c, s: "/overlay.qcow2"
+    )
+    monkeypatch.setattr(
+        "mini_vps.lifecycle.build_seed_iso",
+        lambda c, s, pubkey, secrets=None: "/seed.iso",
+    )
+    monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
+    monkeypatch.setattr(
+        "mini_vps.lifecycle.build_domain_xml", MagicMock(return_value="<domain/>")
+    )
+
+    with caplog.at_level("INFO", logger="mini_vps.lifecycle"):
+        provision(conn, spec)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert messages == [
+        "web-1: nwfilter minivps-web-1 を定義",
+        "web-1: seed ISO を生成 /seed.iso",
+        "web-1: overlay volume を作成 /overlay.qcow2",
+        "web-1: domain を define",
+    ]
+
+
+def test_provision_stops_logging_at_failed_stage(monkeypatch, caplog):
+    """途中で落ちた場合、成功した段階までのログが残る。"""
+    conn = MagicMock()
+    spec = {"name": "web-1"}
+    monkeypatch.setattr("mini_vps.lifecycle.ensure_network_active", MagicMock())
+    monkeypatch.setattr(
+        "mini_vps.lifecycle.build_seed_iso",
+        lambda c, s, pubkey, secrets=None: "/seed.iso",
+    )
+    monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
+    monkeypatch.setattr(
+        "mini_vps.lifecycle.create_overlay_volume",
+        MagicMock(side_effect=RuntimeError("boom")),
+    )
+
+    with caplog.at_level("INFO", logger="mini_vps.lifecycle"):
+        with pytest.raises(RuntimeError):
+            provision(conn, spec)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert messages == ["web-1: seed ISO を生成 /seed.iso"]
+
+
 def test_provision_defines_nwfilter_when_filters_present(monkeypatch):
     conn = MagicMock()
     spec = {"name": "web-1", "filters": [{"port": 22, "protocol": "tcp"}]}
@@ -251,6 +305,34 @@ def test_wait_for_ip_times_out_without_sleeping(monkeypatch):
     # timeout=0 なのでループ本体に入らず即座に None を返す(time.time() 自体はpatch不要)
     assert wait_for_ip(dom, timeout=0) is None
     sleep_mock.assert_not_called()
+
+
+def test_wait_for_ip_warns_on_timeout(monkeypatch, caplog):
+    """無音のまま待ち続けるのではなく、諦めたことを WARNING で残す。"""
+    dom = MagicMock()
+    dom.name.return_value = "web-1"
+    monkeypatch.setattr("mini_vps.lifecycle._lease_ipv4", MagicMock(return_value=None))
+    monkeypatch.setattr("mini_vps.lifecycle.time.sleep", MagicMock())
+
+    with caplog.at_level("WARNING", logger="mini_vps.lifecycle"):
+        assert wait_for_ip(dom, timeout=0) is None
+
+    assert caplog.records[-1].levelname == "WARNING"
+    assert "DHCP リースを取得できなかった" in caplog.records[-1].getMessage()
+
+
+def test_wait_for_ip_logs_acquired_address(monkeypatch, caplog):
+    dom = MagicMock()
+    dom.name.return_value = "web-1"
+    monkeypatch.setattr(
+        "mini_vps.lifecycle._lease_ipv4", MagicMock(return_value="10.0.0.5")
+    )
+    monkeypatch.setattr("mini_vps.lifecycle.time.sleep", MagicMock())
+
+    with caplog.at_level("INFO", logger="mini_vps.lifecycle"):
+        wait_for_ip(dom, timeout=120)
+
+    assert "10.0.0.5" in caplog.records[-1].getMessage()
 
 
 # --- teardown ---

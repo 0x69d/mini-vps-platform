@@ -2,7 +2,7 @@ from unittest.mock import MagicMock
 
 import libvirt
 
-from mini_vps.exporter import DomainCollector, _parse_domain_stats
+from mini_vps.exporter import DomainCollector, _parse_domain_stats, main
 
 RAW_RUNNING = {
     "state.state": libvirt.VIR_DOMAIN_RUNNING,
@@ -217,6 +217,20 @@ def test_collect_survives_libvirt_failure_and_reconnects():
     assert [s.labels["vm"] for s in up_samples] == ["web-1"]
 
 
+def test_collect_warns_on_libvirt_failure(caplog):
+    """scrape_success=0 だけでは理由が分からないため、原因を WARNING に残す。"""
+    broken_mgr = MagicMock()
+    broken_mgr.conn.getAllDomainStats.side_effect = libvirt.libvirtError("down")
+    collector = DomainCollector(MagicMock(return_value=broken_mgr))
+
+    with caplog.at_level("WARNING", logger="mini_vps.exporter"):
+        list(collector.collect())
+
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelname == "WARNING"
+    assert "統計の取得に失敗" in caplog.records[0].getMessage()
+
+
 def test_collect_skips_domain_vanished_mid_scrape():
     mgr = MagicMock()
     vanished_dom = MagicMock()
@@ -241,3 +255,20 @@ def test_collect_skips_domain_vanished_mid_scrape():
     assert [s.labels["vm"] for s in up_samples] == ["web-2"]
     success = _samples_by_name(families, "minivps_exporter_scrape_success")
     assert [s.value for s in success] == [1.0]
+
+
+def test_main_configures_logging(monkeypatch):
+    """入口層としてのログ設定が main() で行われることを確認する。"""
+    captured = []
+    monkeypatch.setattr(
+        "mini_vps.exporter.configure_logging", lambda *a, **kw: captured.append(True)
+    )
+    monkeypatch.setattr("mini_vps.exporter.register_quiet_error_handler", lambda: None)
+    monkeypatch.setattr("mini_vps.exporter.REGISTRY.register", lambda c: None)
+    monkeypatch.setattr("mini_vps.exporter.start_http_server", lambda port, addr: None)
+    # main() は最後に永久待機するため、待機だけ即返るよう差し替える。
+    monkeypatch.setattr("mini_vps.exporter.threading.Event", lambda: MagicMock())
+
+    main()
+
+    assert captured == [True]

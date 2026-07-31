@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .config import LIBVIRT_URI
+from .logging_config import configure as configure_logging
 from .manager import (
     ServerConflict,
     ServerManager,
@@ -32,7 +33,13 @@ async def lifespan(app: FastAPI):
     複数ハンドラから単一接続を共有してよい。ただしそれは個々の API 呼び出しの保証で
     あり、複数呼び出しにまたがる create/delete の収束のアトミック性は ServerManager の
     name 単位ロックの責務である。
+
+    ログは CLI / exporter と同じく自前のハンドラを付けて設定する。uvicorn が
+    ハンドラを付けるのは "uvicorn" 系ロガーだけでルートには付けないため、
+    伝播に任せると INFO 以下が出力先を持たず消える。レベルは環境変数
+    MINIVPS_LOG_LEVEL で制御する。
     """
+    configure_logging()
     register_quiet_error_handler()
     conn = libvirt.open(LIBVIRT_URI)
     app.state.manager = ServerManager(conn)
