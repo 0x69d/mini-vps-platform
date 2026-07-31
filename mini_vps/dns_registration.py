@@ -15,10 +15,10 @@ TSIG 鍵は環境変数で受けたファイルパスを nsupdate の -k にそ�
 本モジュールはファイルを開かない。鍵の中身は spec・libvirt metadata・ログ・
 例外メッセージのいずれにも現れない。
 
-警告の出力には CLI 入口層の print() ではなく logging を使う。manager 層は
-CLI / API / exporter の3入口から共有されるライブラリ層であり、logging 未設定の
-CLI でも標準の last-resort ハンドラが WARNING 以上を stderr に出すため体験は
-print と同等、API 配下ではログ基盤に統合できる。
+警告の出力には CLI 入口層の print() ではなく logging を使う。本モジュールは
+CLI / API / exporter の3入口から共有されるライブラリ層であり、出力先を自分で
+決めない。既定レベルが WARNING なので、3入口いずれでも警告は stderr に出る
+(logging_config 参照)。
 """
 
 import ipaddress

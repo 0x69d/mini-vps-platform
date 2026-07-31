@@ -1,5 +1,23 @@
+import logging
+
 import libvirt
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_minivps_logger():
+    """configure() が触る mini_vps ロガーをテストごとに元へ戻す。
+
+    CLI テストは Typer の callback 経由で実物の configure() を通るため、
+    logging_config のテストに限らず全テストで復元が要る。復元しないと、
+    capsys が差し替えた stderr を掴んだままのハンドラが後続テストへ残る。
+    """
+    logger = logging.getLogger("mini_vps")
+    saved_handlers = list(logger.handlers)
+    saved_level = logger.level
+    yield
+    logger.handlers[:] = saved_handlers
+    logger.setLevel(saved_level)
 
 
 @pytest.fixture(autouse=True)

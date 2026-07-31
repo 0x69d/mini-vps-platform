@@ -60,11 +60,16 @@ def _main_callback(
             "--verbose",
             "-v",
             count=True,
-            help="ログを詳しくする(-v で INFO、-vv で DEBUG)",
+            help="ログを詳しくする(-v で INFO、-vv で DEBUG)。"
+            "サブコマンドより前に置くこと",
         ),
     ] = 0,
 ) -> None:
-    """全コマンド共通の前処理。ログ設定を適用する。"""
+    """全コマンド共通の前処理。ログ設定を適用する。
+
+    グループオプションのため `mini-vps -v list` の位置でのみ受け付ける。
+    `mini-vps list -v` は click がサブコマンドのオプションとして解釈しエラーになる。
+    """
     level = {0: None, 1: "INFO"}.get(verbose, "DEBUG")
     configure_logging(level)
 

@@ -422,3 +422,29 @@ Prometheus・Grafana とも `network_mode: host` で動作し、`127.0.0.1` に�
 
 停止する場合は `docker compose down`(データは named volume に残る)。データも含めて
 完全に削除する場合は `docker compose down -v` を使う。
+
+## ログ
+
+CLI・Web API・エクスポーターの3入口とも、ログは stderr に出力する。CLI の stdout は
+コマンド結果専用なので、`uv run mini-vps list > servers.txt` のようにリダイレクトしても
+ログは混ざらない。
+
+既定のレベルは WARNING。詳しくするには CLI では `-v`(INFO)/`-vv`(DEBUG)を使う。
+グループオプションなのでサブコマンドより前に置くこと(`mini-vps -v get web-1`)。
+
+```bash
+uv run mini-vps -v create mini_vps/vm-spec.yaml
+uv run mini-vps -vv get web-1
+```
+
+`MINIVPS_LOG_LEVEL` 環境変数でも指定でき、3入口すべてに効く。レベル名(`DEBUG`)と
+数値(`10`)のどちらも受け付ける。解釈できない値は WARNING に落ちる。
+
+```bash
+MINIVPS_LOG_LEVEL=INFO uv run uvicorn mini_vps.api:app
+MINIVPS_LOG_LEVEL=DEBUG uv run python -m mini_vps.exporter
+```
+
+VM の spec 本文・cloud-init の user-data 本文・スタートアップスクリプトの
+secrets はどのレベルでも出力しない。DEBUG でも出るのは VM 名やネットワーク名など、
+libvirt の metadata に既に載っている値だけである。

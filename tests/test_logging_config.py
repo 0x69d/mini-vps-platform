@@ -1,21 +1,9 @@
 import logging
 
-import pytest
-
 from mini_vps.logging_config import _HANDLER_MARK, configure, resolve_level
 
+# mini_vps ロガーの退避・復元は conftest.py の _restore_minivps_logger が行う。
 _LOGGER_NAME = "mini_vps"
-
-
-@pytest.fixture(autouse=True)
-def _restore_logger():
-    """configure() が触る mini_vps ロガーをテストごとに元へ戻す。"""
-    logger = logging.getLogger(_LOGGER_NAME)
-    saved_handlers = list(logger.handlers)
-    saved_level = logger.level
-    yield
-    logger.handlers[:] = saved_handlers
-    logger.setLevel(saved_level)
 
 
 def _own_handlers(logger):

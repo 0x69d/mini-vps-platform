@@ -95,8 +95,10 @@ libvirt 接続・subprocess に依存する関数は `unittest.mock`(`MagicMock`
 (`dependency_overrides` の CLI 版)。実 libvirtd・`cloud-localds` バイナリを要する結合的な
 動作確認は、別途手動または統合実行で行う。
 
-ログは `caplog` フィクスチャで検証する。`configure()` を呼ぶテストは `mini_vps` ロガーの
-handlers と level を退避・復元する(`tests/test_logging_config.py` の `_restore_logger` 参照)。
+ログは `caplog` フィクスチャで検証する。`mini_vps` ロガーの handlers と level は
+`tests/conftest.py` の autouse フィクスチャ `_restore_minivps_logger` が全テストで
+退避・復元する(CLI テストは Typer の callback 経由で実物の `configure()` を通るため、
+logging のテストに限らず汚染が起きる)。
 secrets がログに漏れないことは DEBUG レベルで検証する
 (`test_manager.py::test_create_does_not_log_secrets`)。
 

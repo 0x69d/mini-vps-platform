@@ -28,7 +28,7 @@ import sys
 _ROOT_LOGGER_NAME = "mini_vps"
 _LEVEL_ENV_VAR = "MINIVPS_LOG_LEVEL"
 _DEFAULT_LEVEL = logging.WARNING
-_FORMAT = "%(levelname)-5s %(name)s %(message)s"
+_FORMAT = "%(levelname)-8s %(name)s %(message)s"
 
 # configure() が付けたハンドラを識別するための目印。再呼び出しでハンドラが
 # 増殖しないよう、この属性を持つハンドラの有無で判定する。pytest や他の
