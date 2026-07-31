@@ -67,13 +67,11 @@ class NetworkAttachment(BaseModel):
     """静的IPで結線するNIC1件(ネットワーク名・アドレス・任意のゲートウェイ・DNS設定)。
 
     gateway は address のサブネット内にあることを検証する(同一NIC・同一セグメント内で
-    あるべき値のため)。StaticRoute.via(次ホップ)とは異なり、運用者の決め打ちに
-    委ねる対象ではない。
+    あるべき値のため)。StaticRoute.viaとは異なり、運用者の決め打ちに委ねる対象ではない。
 
-    nameservers にはサブネット内検証を掛けない(gateway と異なり、ルータVM越しの
-    別セグメントに立つDNSサーバのIPが正当な値のため)。search は netplan の
-    nameservers.search に渡す検索ドメインのリスト。いずれも空なら network-config に
-    nameservers キー自体を出力しない。
+    nameservers にはサブネット内検証を掛けない。search は netplan の nameservers.search
+    に渡す検索ドメインのリスト。いずれも空なら network-config にnameservers キー自体を
+    出力しない。
     """
 
     name: _NetworkName
@@ -157,7 +155,7 @@ class ServerSpecInput(BaseModel):
 class ServerSpec(ServerSpecInput):
     """name を含む完全な VM スペック。
 
-    hostname 未指定時は name で補完する(従来の load_spec の挙動を踏襲)。
+    hostname 未指定時は name で補完する。
     """
 
     name: str = Field(pattern=_NAME_PATTERN)

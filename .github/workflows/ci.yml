@@ -40,7 +40,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Prepare dummy .env for compose config validation
-        # GF_SECURITY_ADMIN_PASSWORD は :? (未設定なら失敗) 形式のため、
         # 構文検証用にプレースホルダの .env を用意する(実際のシークレットではない)。
         run: cp .env.example .env
 
@@ -59,14 +58,12 @@ jobs:
         run: uv python install 3.14
 
       - name: Sync ops-only dependencies
-        # --no-install-project でmini_vps本体(libvirt-python含む)のビルドを避ける。
-        # ansible-core/ansible-lint はpure Pythonで完結し、libvirt-devは不要。
         run: uv sync --only-group ops --no-install-project
 
       - name: Ansible syntax check
-        # --no-sync: 付けないと uv run が既定の依存構成(mini_vps本体込み)へ暗黙に
-        # 再syncし、直前の --only-group ops --no-install-project が無意味になって
-        # libvirt-python のビルドに失敗する。
+        # --no-sync を外すと uv run が既定の依存構成へ暗黙に再syncし、直前の
+        # --only-group ops --no-install-project が無意味になって libvirt-python の
+        # ビルドに失敗する。
         run: uv run --no-sync ansible-playbook -i ansible/inventory.ini ansible/playbook.yml --syntax-check
 
       - name: ansible-lint

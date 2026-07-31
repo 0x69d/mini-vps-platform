@@ -109,8 +109,8 @@ class ServerRunning(Exception):
     """create() が可変フィールド差分を収束させる対象 VM が起動中であることを表す。
 
     稼働中の memory/vcpus/filters 変更はホットプラグ対応(スコープ外)が必要なため、
-    ServerNotRunning と対称的に fail-loud に拒否する(先に stop してから
-    再度 create/PUT する運用を促す)。
+    ServerNotRunning と対称的に fail-loud に拒否する。先に stop してから
+    再度 create/PUT する運用を促す。
     """
 
 
@@ -165,8 +165,8 @@ def _is_managed(dom) -> bool:
 def _static_ipv4(spec: dict) -> str | None:
     """spec["networks"]に静的アドレスを持つNICがあれば最初の1件のIPv4を返す。
 
-    複数NICに静的アドレスがあっても最初の1件のみ(DHCPリース表示の
-    「最初に見つかった1件のみ」という既存方針に合わせる)。
+    複数NICに静的アドレスがあっても最初の1件のみ。DHCPリース表示の
+    「最初に見つかった1件のみ」という既存方針に合わせる。
     """
     for net in spec.get("networks", []):
         if isinstance(net, dict) and net.get("address"):
@@ -178,8 +178,8 @@ def _status_of(dom, spec: dict) -> dict:
     """VM の状態と IP のスナップショットを返す(IP は待たない)。
 
     spec に静的アドレスを持つ NIC が1つでもあれば、起動状態に関わらず spec 由来の
-    アドレスを優先表示する(cloud-init が実際に適用したかは確認しない、宣言値の
-    エコー)。無ければ従来通り起動中のときだけ DHCP リースを引く。
+    アドレスを優先表示する。cloud-init が実際に適用したかは確認せず、宣言値を
+    そのまま返す。無ければ従来通り起動中のときだけ DHCP リースを引く。
     """
     state = dom.state()[0]
     ip = _static_ipv4(spec)
@@ -193,8 +193,8 @@ class ServerManager:
 
     書き込み系操作(create/delete/start/stop/restart/reinstall)は name 単位ロックで
     直列化し、同名への並行収束(check-then-act)の TOCTOU を防ぐ。
-    別 name 同士は並行のまま。get / list / status はロックを取らない
-    (libvirt 接続が個々の呼び出し単位でスレッドセーフなため)。create() はロック内で
+    別 name 同士は並行のまま。get / list / status は libvirt 接続が個々の
+    呼び出し単位でスレッドセーフなためロックを取らない。create() はロック内で
     self.get() を呼ぶので、読み取り側にロックを足すと非再帰 Lock で自己デッドロック
     する点に注意。
 
@@ -204,7 +204,6 @@ class ServerManager:
 
     def __init__(self, conn):
         self.conn = conn
-        # name -> Lock(生成の直列化は _lock_for を参照)
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
@@ -237,8 +236,8 @@ class ServerManager:
         secrets(startup_script テンプレートに渡す秘密情報)は provision() にのみ
         渡し、_write_spec()(=libvirt metadata)には渡さない。
 
-        新規作成成功後は DNS レコードをベストエフォートで登録する
-        (opt-in、失敗しても create は成功する。docs/dns-registration.md 参照)。
+        新規作成成功後は DNS レコードをベストエフォートで登録する。opt-in であり、
+        失敗しても create は成功する。docs/dns-registration.md 参照。
 
         Returns:
             (result, created) のタプル。result は spec と status をキーに持つ dict。
@@ -291,9 +290,9 @@ class ServerManager:
     def _converge(self, dom, old_spec: dict, new_spec: dict, diff_keys: set) -> object:
         """可変フィールド(memory/vcpus/filters)の差分を、停止中の domain に適用する。
 
-        dom.XMLDesc(INACTIVE) を最小差分編集して defineXML する(build_domain_xml に
+        dom.XMLDesc(INACTIVE) を最小差分編集して defineXML する。build_domain_xml に
         よるテンプレート再構築ではなく既存定義への差分編集にすることで、MAC アドレス・
-        UUID の意図しない再生成を避ける)。nwfilter は使用中(domain の filterref から
+        UUID の意図しない再生成を避ける。nwfilter は使用中(domain の filterref から
         参照されている間)は undefine できないため(teardown() 参照)、フィルタ解除時は
         defineXML で filterref を外した後に undefine する。フィルタ新設時は逆に
         nwfilterDefineXML で先に定義してから defineXML で filterref を付ける
@@ -374,8 +373,8 @@ class ServerManager:
         """管理対象の VM を削除する。
 
         未管理(または不在)の name は削除せず ServerNotFound で拒否する。
-        削除成功後は DNS レコードをベストエフォートで削除する
-        (opt-in、失敗しても delete は成功する。docs/dns-registration.md 参照)。
+        削除成功後は DNS レコードをベストエフォートで削除する。opt-in であり、
+        失敗しても delete は成功する。docs/dns-registration.md 参照。
 
         Raises:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
@@ -384,8 +383,8 @@ class ServerManager:
         with self._lock_for(name):
             dom = _lookup(self.conn, name)
             # DNS レコードの削除に使う IP は teardown で metadata ごと消える前に
-            # 読んでおく。unregister は teardown 成功後にのみ呼ぶ(teardown が
-            # 失敗した=VM が残っているのに名前だけ消える事故を防ぐ)。
+            # 読んでおく。unregister は teardown 成功後にのみ呼ぶ。teardown が
+            # 失敗した=VM が残っているのに名前だけ消える事故を防ぐため。
             spec = _read_spec(dom)
             teardown(self.conn, {"name": name})
             dns_registration.unregister(spec)
@@ -394,8 +393,8 @@ class ServerManager:
         """管理対象の VM を起動する。
 
         既に起動中なら何もせず現状を返す(冪等)。create()/reinstall() と同じく、
-        dom.create() の前に spec が参照する network を確実に起動する(ホスト再起動後
-        などで network だけ非アクティブなまま domain が残るケースに備える)。
+        dom.create() の前に spec が参照する network を確実に起動する。ホスト再起動後
+        などで network だけ非アクティブなまま domain が残るケースに備えるため。
 
         Returns:
             spec と status をキーに持つ dict。
@@ -436,8 +435,8 @@ class ServerManager:
 
         reinstall と異なり disk・spec・IP は変更しない。force=False(既定)は
         dom.reboot() でゲスト OS へ ACPI 経由の正常再起動を要求するのみで、
-        停止中の VM には ServerNotRunning を送出し fail-loud に拒否する(電源が
-        入っていない機器を ACPI 経由で再起動できないのと同じ)。force=True は
+        停止中の VM には ServerNotRunning を送出し fail-loud に拒否する。電源が
+        入っていない機器を ACPI 経由で再起動できないのと同じ。force=True は
         起動中なら destroy() してから create() する強制再起動(停止中の VM は
         create() のみで起動する)。start()と同じく create() の前に network を
         確実に起動する。
@@ -472,9 +471,9 @@ class ServerManager:
         テンプレートを再度効かせたい場合は呼び出しのたびに secrets を
         渡し直す必要がある。
 
-        起動成功後は DNS レコードをベストエフォートで再登録する(冪等な
-        delete→add の組なので無害。DNS 有効化前に作った VM のレコードを
-        後追い補充する復旧手段を兼ねる。docs/dns-registration.md 参照)。
+        起動成功後は DNS レコードをベストエフォートで再登録する。冪等な
+        delete→add の組なので無害で、DNS 有効化前に作った VM のレコードを
+        後追い補充する復旧手段を兼ねる。docs/dns-registration.md 参照。
 
         Returns:
             spec と status をキーに持つ dict。

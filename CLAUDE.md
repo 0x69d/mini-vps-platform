@@ -6,13 +6,13 @@
 
 ## プロジェクト概要
 
-QEMU/KVM + libvirt を使った**単一ホスト向けの小さな VM 制御プレーン**。
+QEMU/KVM + libvirt を使った単一ホスト向けの小さな VM 制御プレーン。
 spec(YAML/JSON) → parse → XML → libvirt define/start という一方向の流れで VM を宣言的に管理する。
 状態は自前 DB を持たず、libvirt domain の `<metadata>` に spec を埋め込んで往復させる。
 
 ## 主要コマンド
 
-パッケージ管理は **uv**(`uv.lock` 追跡)。Python は **3.14 以上**が必須(`.python-version`)。
+パッケージ管理は uv(`uv.lock` 追跡)。Python は 3.14 以上が必須(`.python-version`)。
 
 | 目的 | コマンド |
 | --- | --- |
@@ -28,25 +28,25 @@ spec(YAML/JSON) → parse → XML → libvirt define/start という一方向の
 
 上位から下位へ、各層は下位層の薄いラッパー。
 
-- **`spec.py`** — 検証の真実源。Pydantic モデル `FilterRule` / `ServerSpecInput`(name 無し) /
+- `spec.py` — 検証の真実源。Pydantic モデル `FilterRule` / `ServerSpecInput`(name 無し) /
   `ServerSpec`(name 付き, `hostname` 未指定なら `name` で補完)。`load_spec`(YAML)・`read_pubkey`。
   YAML(CLI) と JSON(API) の両入口をこの 1 モデルに収束させる設計を壊さないこと。
-- **`startup_scripts.py`** — 名前付き cloud-init テンプレート。テンプレート名から
+- `startup_scripts.py` — 名前付き cloud-init テンプレート。テンプレート名から
   `write_files`/`runcmd` フラグメントを組み立てる。秘密情報(secrets)はここでのみ user-data へ
   展開され、spec/metadata には一切載せない。例外 `StartupScriptError`。
-- **`manager.py`** — `ServerManager`。`name` を主キーに操作する管理層。書き込み系操作
+- `manager.py` — `ServerManager`。`name` を主キーに操作する管理層。書き込み系操作
   (create/delete/start/stop/restart/reinstall)を `name` 単位ロックで直列化して TOCTOU を防ぐ。
-  read(get/list/status)はロックを取らない
-  (`create()` がロック内で `self.get()` を呼ぶため、read にロックを足すと非再帰 Lock で自己デッドロックする)。
+  read(get/list/status)はロックを取らない。
+  `create()` がロック内で `self.get()` を呼ぶため、read にロックを足すと非再帰 Lock で自己デッドロックする。
   spec は libvirt `<metadata>` に埋め込み、自前 DB を持たない。
   例外 `ServerNotFound`/`ServerConflict`/`ServerNotRunning`。
-- **`lifecycle.py`** — `provision` / `teardown` / `wait_for_ip` / `ensure_network_active`。
-- **`dns_registration.py`** — nsupdate subprocess による A/PTR の自動登録(opt-in・ベストエフォート、
-  manager の create/delete/reinstall から呼ばれ例外を伝播させない。`docs/dns-registration.md` 参照)。
-- **`resources.py`** — pool / overlay volume / seed ISO / domain XML / nwfilter XML の生成。
+- `lifecycle.py` — `provision` / `teardown` / `wait_for_ip` / `ensure_network_active`。
+- `dns_registration.py` — nsupdate subprocess による A/PTR の自動登録。opt-in・ベストエフォートで、
+  manager の create/delete/reinstall から呼ばれ例外を伝播させない。`docs/dns-registration.md` 参照。
+- `resources.py` — pool / overlay volume / seed ISO / domain XML / nwfilter XML の生成。
   純粋関数(`build_domain_xml`・`build_nwfilter_xml`・`_filter_name`)と、libvirt/subprocess を伴う関数が同居。
-- **`config.py`** — 定数(`LIBVIRT_URI` 含む)と XML/cloud-init テンプレート。
-- **入口** — CLI: `cli.py`(manager の例外を終了コードへ正規化。`__main__.py` は `cli.run` への
+- `config.py` — 定数(`LIBVIRT_URI` 含む)と XML/cloud-init テンプレート。
+- 入口 — CLI: `cli.py`(manager の例外を終了コードへ正規化。`__main__.py` は `cli.run` への
   shim)、Web API: `api.py`(manager の例外を HTTP ステータスへ正規化)、
   Prometheus エクスポーター: `exporter.py`(`ServerManager` を読み取り専用で再利用し、
   `conn.getAllDomainStats()` の一括統計を `prometheus_client` の Custom Collector として公開)。
@@ -54,9 +54,9 @@ spec(YAML/JSON) → parse → XML → libvirt define/start という一方向の
 
 ## コーディング規約
 
-- **docstring は必須・日本語・google 規約**。ruff `D` を有効化(`D105`/`D107`/`D415` のみ ignore、
-  `D415` は日本語句点「。」を許すため)。line-length は 88。
-- **コミットは Conventional Commits を日本語で**書く(例: `feat: nwfilter で inbound フィルタを実装する`、
+- docstring は必須・日本語・google 規約。ruff `D` を有効化し、`D105`/`D107`/`D415` のみ ignore する。
+  `D415` を ignore するのは日本語句点「。」を許すため。line-length は 88。
+- コミットは Conventional Commits を日本語で書く(例: `feat: nwfilter で inbound フィルタを実装する`、
   `fix: create() の TOCTOU を name 単位ロックで直列化`、`docs: ...`)。
 - 入力検証は増やさず `spec.py` の `ServerSpec` に集約する。
 

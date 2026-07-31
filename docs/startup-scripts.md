@@ -12,12 +12,12 @@
 
 `opencode-sakura-ai-engine` は secrets に `AI_ENGINE_TOKEN`(さくらのAI Engineの
 アクセストークン)を必須とする。実機検証では 2GB メモリの VM で OpenCode のエージェント
-機能(ファイル書き込み等のツール呼び出し)を含めて問題なく動作した。
+機能含め問題なく動作した。
 
 ## 秘密情報(secrets)の渡し方
 
-さくらのAI Engineのトークンのような秘密情報は、VM の spec そのもの(`ServerSpec`)には
-含めない。このリポジトリは自前 DB を持たず、spec を丸ごと libvirt domain の
+さくらのAI Engineのトークンのような秘密情報は、VM の spec そのものには含めない。
+このリポジトリは自前 DB を持たず、spec を丸ごと libvirt domain の
 `<metadata>` に永続化して `get`/`list`/`status` で平文のまま読み戻す設計のため、
 spec に混ぜると秘密情報がそのまま漏洩する。secrets は VM 作成/reinstall のたびに
 spec とは別経路で渡す。
@@ -51,16 +51,16 @@ secrets は libvirt の metadata に一切保存されない。そのため `rei
 `startup_script` を再度実行する場合は、そのたびに `--startup-param`/`secrets`
 を渡し直す必要がある。
 
-## スコープ外(既知の制約)
+## スコープ外
 
 - 生成した seed ISO(`{name}-seed.iso`)には秘密情報が平文で書き込まれ、ホスト上に
   残る。既存の SSH 公開鍵と同じ性質の制約であり、本プロジェクトはシークレット
-  管理機構を持たない(スコープ外)。
+  管理機構を持たない。
 - `--startup-param` の値はシェル履歴・`ps` の引数一覧に残りうる。
 
 ## モデルについて
 
-`opencode-sakura-ai-engine` の既定モデルは `gpt-oss-120b`(安定版)。コーディング/
+`opencode-sakura-ai-engine` の既定モデルは `gpt-oss-120b`。コーディング/
 エージェント用途向けの `preview/Kimi-K2.6` も選択肢として登録されるが、プレビュー
 扱いのため今後仕様が変更される可能性がある。さくらのAI Engineのモデルラインナップは
 変更されることがある。最新のモデル一覧は `GET https://api.ai.sakura.ad.jp/v1/models`

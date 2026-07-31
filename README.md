@@ -3,7 +3,7 @@
 QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 
 宣言的な YAML 入力を受け取り、ローカルマシン上に仮想サーバーをプロビジョニングする。
-クラウドでいう「コントロールプレーン」の中核——宣言的入力からリソース確保までの翻訳——を自作する。
+クラウドでいう「コントロールプレーン」の中核、つまり宣言的入力からリソース確保までの翻訳を自作する。
 
 ## 目的・前提
 
@@ -13,15 +13,14 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 
 ## スコープ
 
-### 含むもの（最小構成）
+### 含むもの
 
-- `Server` リソース: YAML / JSON 定義から libvirt domain を生成・起動・停止・削除する。
+- Server リソース: YAML / JSON 定義から libvirt domain を生成・起動・停止・削除する。
 - NAT ネットワーク: libvirt の仮想ブリッジ経由でゲストを外向き通信させる。
 - セグメント分離: 複数の独立 NAT ネットワークで VM を隔離する。
-- パケットフィルタ: `filters` で宣言した inbound ポートのみ許可する
-  (作成後に `vm-spec.yaml` を編集して再度 `create`/`PUT` することで変更できる)。
-- 静的IP割当: `networks` の要素に `NetworkAttachment`(`name`/`address`/`gateway`)を
-  指定すると、cloud-init の `network-config` 経由で固定IPを割り当てる
+- パケットフィルタ: `filters` で宣言した inbound ポートのみ許可する。
+  作成後に `vm-spec.yaml` を編集して再度 `create`/`PUT` することで変更もできる。
+- 静的IP割当: `networks` の要素に `NetworkAttachment`を指定すると、cloud-init の `network-config` 経由で固定IPを割り当てる
   ([静的IP割当](#静的ip割当)参照)。
 - 監視: Prometheus + Grafana によってメトリクスを可視化する。
 
@@ -29,19 +28,17 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 
 - 複数物理ホストへのスケジューリング。
 - マルチテナンシー、課金、認証などの大規模運用機構。
-- パケットフィルタの IPv6・egress・稼働中 VM へのライブ反映(ルール変更は停止中の VM に
-  限り inbound・IPv4 のみ対応、反映は次回起動時から)。
-- アラート通知(Alertmanager 等)。
-- MAC アドレスのユーザー明示指定(`(name, index)` から内部で決定的に自動生成する。
-  [静的IP割当](#静的ip割当)参照)。
-- `status`/`get` の IP アドレス表示は、複数 NIC の VM でも最初に見つかった1件のみ
-  (全 NIC の IP 一覧表示は非対応。静的アドレスを持つ NIC があれば起動状態に関わらず
-  それを優先し、無ければ起動中の DHCP リースを表示する)。
-- `networks`・`static_routes` は `create()` の可変フィールドではない
-  (`startup_script` と同様、変更するには対象 VM の削除・再作成が必要)。
-- 静的アドレスと Ansible 側 DHCP レンジ(`.2`〜`.254`、セグメント全域)の衝突回避
-  (dnsmasq の ICMP 到達確認である程度は緩和されるが、起動順序次第で衝突しうる。
-  レンジを狭める調整は本プロジェクトのスコープ外)。
+- パケットフィルタの IPv6・egress・稼働中 VM へのライブ反映。ルール変更は停止中の VM に
+  限り inbound・IPv4 のみ対応。
+- アラート通知。
+- MAC アドレスのユーザー明示指定。
+- `status`/`get` の IP アドレス表示は、複数 NIC の VM でも最初に見つかった1件のみ。
+  全 NIC の IP 一覧表示は非対応。静的アドレスを持つ NIC があれば起動状態に関わらず
+  それを優先する。
+- `networks`・`static_routes` は `create()` の可変フィールドではない。
+  `startup_script` と同様、変更するには対象 VM の削除・再作成が必要。
+- 静的アドレスと Ansible 側 DHCP レンジ(`.2`〜`.254`、セグメント全域)の衝突回避。
+  dnsmasq の ICMP 到達確認である程度は緩和されるが、起動順序次第で衝突しうる。
 
 ## アーキテクチャ
 
@@ -49,9 +46,9 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 spec.yaml / spec.json  →  parse  →  内部データ構造  →  XML 生成  →  libvirt define / start
 ```
 
-- **入力**: YAML / JSON。domain XML は手書きせず、変換層で生成する。
-- **ネットワーク**: NAT。ゲストはセグメントごとに独立した仮想ブリッジに接続し、ホストの NAT 経由で外に出る。
-- **実体**: 各 VM は libvirt domain に対応する。
+- 入力: YAML / JSON。domain XML は手書きせず、変換層で生成する。
+- ネットワーク: NAT。ゲストはセグメントごとに独立した仮想ブリッジに接続し、ホストの NAT 経由で外に出る。
+- 実体: 各 VM は libvirt domain に対応する。
 
 ## 最小 YAML スキーマ
 
@@ -72,7 +69,7 @@ disk: 10                      # GB
 | `disk` | int (GB, 正の整数) | 必須 | — |
 | `hostname` | str（`name` と同じ文字種制約） | 任意 | 未指定なら `name` で補完 |
 | `user` | str（小文字・数字・`-`・`_`、先頭は小文字かアンダースコア、32文字以内） | 任意 | `ubuntu` |
-| `networks` | list[str \| NetworkAttachment]（各要素は文字列(DHCP)か `NetworkAttachment`(静的IP)、1件以上、ネットワーク名の重複不可)。Ansible で事前定義済みのネットワーク名(`default`・`seg1`〜`seg3`)を指定する。未定義名を指定すると作成時に libvirt エラーになる。複数指定すると VM に複数 NIC が付く | 任意 | `["default"]` |
+| `networks` | list[str \| NetworkAttachment]（各要素は文字列か `NetworkAttachment`、1件以上、ネットワーク名の重複不可)。Ansible で事前定義済みのネットワーク名(`default`・`seg1`〜`seg3`)を指定する。未定義名を指定すると作成時に libvirt エラーになる。複数指定すると VM に複数 NIC が付く | 任意 | `["default"]` |
 | `filters` | list[FilterRule] \| null | 任意 | 未指定(null)なら全 inbound 許可。`[]` を明示すると全 inbound 拒否 |
 | `static_routes` | list[StaticRoute] | 任意 | 未指定なら追加ルート無し([スタティックルート](#スタティックルート)参照) |
 | `startup_script` | str \| null | 任意 | 未指定(null)。指定する場合は既知のテンプレート名のみ許可([docs/startup-scripts.md](docs/startup-scripts.md) 参照) |
@@ -85,19 +82,18 @@ disk: 10                      # GB
 nameservers: list[str(IPv4アドレス)], search: list[str(ドメイン名)]}`
 の静的IP割当1件([静的IP割当](#静的ip割当)参照)。`gateway` は任意で、省略時はそのNICに
 デフォルトルートを追加しない。`nameservers`/`search` はそのNICに設定するDNSサーバIPと
-検索ドメインのリストで、省略時(空)は netplan に出力しない。`gateway` と異なり
+検索ドメインのリストで、省略時は netplan に出力しない。`gateway` と異なり
 `nameservers` にはサブネット内検証を掛けない(ルータVM越しの別セグメントに立つ
 DNSサーバのIPが正当な値のため)。
 
 > **警告**: `filters` を1件でも宣言すると、明示したポート以外の inbound は SSH(22番)を含めて
 > すべて拒否される。SSH アクセスを維持したい場合は `{port: 22, protocol: "tcp"}` を
-> 自分で `filters` に含める必要がある(暗黙の許可は無い)。
+> 自分で `filters` に含める必要がある。
 
 ## ネットワークセグメント
 
-VM を互いに隔離するための独立 NAT ネットワーク。Ansible playbook が以下を事前定義する
-(定義は `ansible/vars/network_segments.yml`)。セグメントのサブネットは
-「192.168.(200+セグメント番号).0/24」の規則で、名前から即座に読み取れる。
+VM を互いに隔離するための独立 NAT ネットワーク。Ansible playbook が以下を事前定義する。セグメントのサブネットは
+「192.168.(200+セグメント番号).0/24」の規則。
 
 | name | bridge | サブネット | DHCP レンジ |
 |---|---|---|---|
@@ -107,7 +103,7 @@ VM を互いに隔離するための独立 NAT ネットワーク。Ansible play
 | `seg3` | virbr-seg3 | 192.168.203.0/24 | .2〜.254 |
 
 `default` とセグメントの違いは管理元と役割のみ。`default` はディストリ同梱 XML から
-定義される libvirt 標準ネットワークで、spec で `networks` 未指定時の受け皿(汎用)。
+定義される libvirt 標準ネットワークで、spec で `networks` 未指定時の受け皿。
 `seg1`〜`seg3` は本プロジェクトが vars で管理する、分離を明示的に意図した配置先。
 遮断の機構は共通で、`default` も各セグメントから見れば相互遮断されたネットワークの
 1つとして振る舞う。
@@ -135,19 +131,18 @@ disk: 10
 networks: [seg1, seg2]
 ```
 
-**ポリシー**: 同一セグメント内の VM は自由に通信できる。セグメント間は相互遮断され、
-各セグメントから外向き(インターネット方向)の通信は NAT 経由で許可される。
+ポリシー: 同一セグメント内の VM は自由に通信できる。セグメント間は相互遮断され、
+各セグメントからインターネット方向の通信は NAT 経由で許可される。
 
 この遮断に追加のファイアウォール設定は不要である。libvirt は NAT ネットワークの起動時に
 ネットワーク単位の FORWARD ルール(iptables backend では `LIBVIRT_FWI`/`LIBVIRT_FWO`
-チェーン)を自動投入し、別ブリッジ宛の新規パケットは宛先ネットワーク側の REJECT に当たる
+チェーン)を自動投入する。別ブリッジ宛の新規パケットは宛先ネットワーク側の REJECT に当たる
 ため、独立 NAT ネットワークに分けた時点でセグメント間通信は遮断される。
 
 > **注意**: ホスト側で FORWARD チェーンの `LIBVIRT_*` より前に広範な ACCEPT ルールを
 > 手動追加すると、この遮断は崩れる。
 
-セグメントを追加する場合は `ansible/vars/network_segments.yml` に1エントリ追記して
-playbook を再実行する(サブネットとブリッジ名は既存と重複させないこと)。
+セグメントを追加する場合は `ansible/vars/network_segments.yml` に1エントリ追記してplaybook を再実行する。
 
 ## 静的IP割当
 
@@ -173,12 +168,11 @@ networks:
     gateway: 192.168.202.1
 ```
 
-**仕組み**: `create()` は VM名とNICインデックスから決定的にMACアドレスを生成し
+仕組み: `create()` は VM名とNICインデックスから決定的にMACアドレスを生成し
 (`52:54:00` プレフィックス)、domain XML の各 `<interface>` に埋め込む。静的IPを持つ
-NICが1つでもあれば、cloud-init の `network-config`(v2形式)を生成し
+NICが1つでもあれば、cloud-init の `network-config`を生成し
 `cloud-localds -N` で seed ISO に組み込む。`network-config` を渡すとそれが唯一の
-設定源になるため、DHCPの文字列要素も含めて全NICをMACマッチで列挙する(記載の無い
-NICは cloud-init から一切設定されなくなるため)。静的IPを1つも持たないVMでは
+設定源になるため、DHCPの文字列要素も含めて全NICをMACマッチで列挙する。静的IPを1つも持たないVMでは
 `network-config` 自体を生成せず、cloud-localds の呼び出しも変わらない。
 
 `gateway` を指定すると、そのNICに `routes: [{to: default, via: gateway}]` として
@@ -197,12 +191,12 @@ systemd-resolved がリゾルバとして使う(`resolvectl status` で確認で
 VM 作成/削除時に A/PTR レコードを内部DNSへ自動登録する opt-in 機能もある
 ([docs/dns-registration.md](docs/dns-registration.md) 参照)。
 
-**`status`/`get` のIP表示**: 静的アドレスを持つNICが1つでもあれば、VMの起動状態に
+`status`/`get` のIP表示: 静的アドレスを持つNICが1つでもあれば、VMの起動状態に
 関わらずそれを(宣言値として)優先表示する。cloud-initが実際に適用したかは確認しない。
 静的アドレスが無ければ従来通り起動中のみDHCPリースを表示する。いずれの場合も複数NIC
 中の最初の1件のみ。
 
-**既知の制約**: Ansible が定義するDHCPレンジ(`.2`〜`.254`、セグメント全域)は静的
+既知の制約: Ansible が定義するDHCPレンジ(`.2`〜`.254`、セグメント全域)は静的
 アドレスの割当範囲と重複しうる。dnsmasqのICMP到達確認である程度は緩和されるが、
 起動順序次第では衝突する可能性がある。レンジを狭める調整は本プロジェクトのスコープ外。
 
@@ -236,13 +230,13 @@ static_routes:
 自体はそれを検証しない。次ホップ側(例: ルータVM)のIPを安定させたい場合は
 [静的IP割当](#静的ip割当)を参照。
 
-**永続化の仕組み**: cloud-init の `runcmd` は初回起動時にしか実行されないため、単純な
+永続化の仕組み: cloud-init の `runcmd` は初回起動時にしか実行されないため、単純な
 `ip route add` では VM 再起動後にルートが消える。そのため `ip route replace` を
 `ExecStart` に持つ systemd oneshot ユニットを書き込み、`systemctl enable --now` で
 有効化する。`enable` により次回以降の起動でも自動的に再適用され、これが再起動をまたぐ
 永続化の実体になる。
 
-**トラブルシューティング**: `ExecStart` の各行は先頭に `-` を付けており、1つの経路が
+トラブルシューティング: `ExecStart` の各行は先頭に `-` を付けており、1つの経路が
 `via` 未到達で失敗しても他の経路の適用を妨げない。この `-` はエラーを握りつぶすため、
 失敗はユニット全体のステータスには現れない。適用結果を確認するには、ゲスト内で以下を
 実行する。
@@ -407,9 +401,9 @@ uv run python -m mini_vps.exporter
 
 ### 6. Prometheus + Grafana(docker-compose)
 
-`### 5.` の exporter が公開するメトリクスを Prometheus でスクレイプし、Grafana で
+`5.` の exporter が公開するメトリクスを Prometheus でスクレイプし、Grafana で
 可視化する。Docker(docker compose v2 プラグイン込み)が導入済みであること、
-`### 5.` の exporter が `127.0.0.1:9177` で起動済みであることが前提。
+`5.` の exporter が `127.0.0.1:9177` で起動済みであることが前提。
 
 ```bash
 uv run python -m mini_vps.exporter &   # 別ターミナルで起動していれば不要

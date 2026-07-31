@@ -160,6 +160,6 @@ WantedBy=multi-user.target
 """
 
 # ExecStart 1行分。先頭の "-" は、この経路の via が到達不能で失敗しても他の
-# ExecStart 行の適用を止めないためのもの(失敗はユニット全体のステータスには
-# 現れなくなるため、確認には journalctl -u が必要)。
+# ExecStart 行の適用を止めないためのもの。失敗はユニット全体のステータスには
+# 現れなくなるため、確認には journalctl -u が必要。
 STATIC_ROUTES_EXEC_LINE_TEMPLATE = "ExecStart=-ip route replace {destination} via {via}"
