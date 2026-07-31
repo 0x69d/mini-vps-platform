@@ -24,7 +24,7 @@ from mini_vps.spec import ServerSpec
 # --- register_quiet_error_handler ---
 
 
-def test_register_quiet_error_handler_registers_noop_handler(monkeypatch):
+def test_register_quiet_error_handler_logs_message_at_debug(monkeypatch, caplog):
     captured = {}
 
     def _register(handler, ctx):
@@ -36,8 +36,33 @@ def test_register_quiet_error_handler_registers_noop_handler(monkeypatch):
     register_quiet_error_handler()
 
     assert captured["ctx"] is None
-    # 登録したハンドラ自体は何もしない(例外を投げない)ことだけを確認する。
-    captured["handler"](None, None)
+
+    # libvirt が渡すのは 9 要素のリストで、index 2 がメッセージ本文。
+    err = [42, 10, "Domain not found: no domain with name 'x'", 2, "a", "b", None, 0, 0]
+    with caplog.at_level("DEBUG", logger="mini_vps.manager"):
+        captured["handler"](None, err)
+
+    records = [r for r in caplog.records if r.name == "mini_vps.manager"]
+    assert len(records) == 1
+    assert records[0].levelname == "DEBUG"
+    # リスト全体ではなく message だけが出ることを確認する。
+    assert (
+        records[0].getMessage() == "libvirt: Domain not found: no domain with name 'x'"
+    )
+
+
+def test_register_quiet_error_handler_is_silent_by_default(monkeypatch, caplog):
+    captured = {}
+    monkeypatch.setattr(
+        libvirt, "registerErrorHandler", lambda h, c: captured.update(handler=h)
+    )
+    register_quiet_error_handler()
+
+    # 既定レベル(WARNING)では、正常系として握りつぶすエラーは表に出ない。
+    with caplog.at_level("WARNING", logger="mini_vps.manager"):
+        captured["handler"](None, [42, 10, "no domain", 2, "", "", None, 0, 0])
+
+    assert [r for r in caplog.records if r.name == "mini_vps.manager"] == []
 
 
 # --- _write_spec / _read_spec ---
@@ -344,6 +369,129 @@ def test_create_rolls_back_on_failure(monkeypatch):
         mgr.create({"name": "web-1"})
 
     teardown_mock.assert_called_once_with(conn, {"name": "web-1"})
+
+
+def test_create_logs_start_and_completion(monkeypatch, caplog):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: None)
+    monkeypatch.setattr(
+        "mini_vps.manager.provision", MagicMock(return_value=MagicMock())
+    )
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    mgr.get = MagicMock(return_value={"spec": {"name": "web-1"}, "status": {}})
+
+    with caplog.at_level("INFO", logger="mini_vps.manager"):
+        mgr.create({"name": "web-1"})
+
+    messages = [r.getMessage() for r in caplog.records if r.name == "mini_vps.manager"]
+    assert "web-1: 新規作成を開始" in messages
+    assert "web-1: 新規作成が完了" in messages
+
+
+def test_create_logs_error_on_rollback(monkeypatch, caplog):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: None)
+    monkeypatch.setattr(
+        "mini_vps.manager.provision", MagicMock(side_effect=RuntimeError("boom"))
+    )
+    monkeypatch.setattr("mini_vps.manager.teardown", MagicMock())
+
+    with caplog.at_level("ERROR", logger="mini_vps.manager"):
+        with pytest.raises(RuntimeError):
+            mgr.create({"name": "web-1"})
+
+    assert "web-1: 新規作成に失敗、巻き戻す" in [r.getMessage() for r in caplog.records]
+
+
+def test_create_does_not_log_secrets(monkeypatch, caplog):
+    """secrets と spec 本文がログに現れないことを確認する。
+
+    secrets は startup_scripts.py で user-data にのみ展開され、spec にも
+    libvirt metadata にも載らない。ログはその不変条件を破る経路になりうるため、
+    最も詳しい DEBUG レベルで漏れないことを検証する。
+    """
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    secrets = {"AI_ENGINE_TOKEN": "sk-super-secret"}
+    spec = _full_spec(startup_script="opencode-sakura-ai-engine")
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: None)
+    monkeypatch.setattr(
+        "mini_vps.manager.provision", MagicMock(return_value=MagicMock())
+    )
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    mgr.get = MagicMock(return_value={"spec": spec, "status": {}})
+
+    with caplog.at_level("DEBUG", logger="mini_vps"):
+        mgr.create(spec, secrets=secrets)
+
+    emitted = "\n".join(r.getMessage() for r in caplog.records)
+    assert "sk-super-secret" not in emitted
+    assert "AI_ENGINE_TOKEN" not in emitted
+
+
+def test_create_logs_diff_field_names_when_converging(monkeypatch, caplog):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = False
+    old_spec = ServerSpec(**_full_spec()).model_dump()
+    new_spec = dict(old_spec, memory=2048)
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: dict(old_spec))
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    mgr._converge = MagicMock(return_value=dom)
+    mgr.get = MagicMock(return_value={"spec": new_spec, "status": {}})
+
+    with caplog.at_level("INFO", logger="mini_vps.manager"):
+        mgr.create(new_spec)
+
+    assert "web-1: 差分を収束 fields=['memory']" in [
+        r.getMessage() for r in caplog.records
+    ]
+
+
+def test_locked_logs_only_when_contended(caplog):
+    """ロックが空いていれば待ちログは出ない。"""
+    mgr = ServerManager(MagicMock())
+
+    with caplog.at_level("DEBUG", logger="mini_vps.manager"):
+        with mgr._locked("web-1"):
+            pass
+
+    assert [r for r in caplog.records if "ロック待ち" in r.getMessage()] == []
+
+
+def test_locked_logs_wait_when_already_held(caplog):
+    """先客がいる場合だけ待ちログを出す。"""
+    import threading
+    import time
+
+    mgr = ServerManager(MagicMock())
+    lock = mgr._lock_for("web-1")
+    lock.acquire()
+
+    entered = threading.Event()
+
+    def _worker():
+        with mgr._locked("web-1"):
+            entered.set()
+
+    with caplog.at_level("DEBUG", logger="mini_vps.manager"):
+        thread = threading.Thread(target=_worker)
+        thread.start()
+        # ワーカーが待ちログを出してブロックするまで待ってから解放する。
+        deadline = time.monotonic() + 5
+        while not any("ロック待ち" in r.getMessage() for r in list(caplog.records)):
+            assert time.monotonic() < deadline, "待ちログが出なかった"
+            time.sleep(0.01)
+        lock.release()
+        thread.join(timeout=5)
+
+    assert entered.is_set()
+    assert "web-1: ロック待ち" in [r.getMessage() for r in caplog.records]
 
 
 def test_create_forwards_secrets_to_provision(monkeypatch):

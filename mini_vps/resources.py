@@ -1,6 +1,7 @@
 """ストレージプール・volume・ISO・domain XML のリソース生成。"""
 
 import hashlib
+import logging
 import os
 import subprocess
 import tempfile
@@ -28,6 +29,8 @@ from .config import (
     STATIC_ROUTES_UNIT_TEMPLATE,
 )
 from .startup_scripts import render_startup_script
+
+_LOGGER = logging.getLogger(__name__)
 
 # QEMU/libvirt が自動生成する MAC で慣習的に使う locally-administered なプレフィックス。
 _MAC_PREFIX = "52:54:00"
@@ -105,6 +108,7 @@ def ensure_pool(conn, name, xml) -> libvirt.virStoragePool:
     pool.build(0)
     pool.create(0)
     pool.setAutostart(1)
+    _LOGGER.info("ストレージプール %s を作成した", name)
     return pool
 
 
@@ -122,11 +126,14 @@ def create_overlay_volume(conn, spec) -> str:
     base_pool.refresh(0)
     base_path = base_pool.storageVolLookupByName(spec["base_image"]).path()
 
+    _LOGGER.debug("%s: base image %s", spec["name"], base_path)
+
     pool = ensure_pool(conn, POOL_NAME, POOL_XML)
     vol_name = f"{spec['name']}.qcow2"
 
     if vol_name in {v.name() for v in pool.listAllVolumes()}:
         pool.storageVolLookupByName(vol_name).delete(0)
+        _LOGGER.debug("%s: 既存 overlay volume を削除して作り直す", spec["name"])
 
     xml = OVERLAY_VOL_XML_TEMPLATE.format(
         name=spec["name"], disk=spec["disk"], base_path=base_path
@@ -238,6 +245,9 @@ def build_seed_iso(conn, spec, pubkey, secrets: dict[str, str] | None = None) ->
             cmd += ["-N", nc_file_path]
         cmd += [iso_path, ud_file_path, md_file_path]
 
+        # cmd に載るのは一時ファイルのパスだけで、user-data の中身(secrets を
+        # 含みうる)は載らない。ログに出してよいのはこの引数列までとする。
+        _LOGGER.debug("%s: cloud-localds を実行 %s", spec["name"], cmd)
         subprocess.run(cmd, check=True)
 
         pool = ensure_seed_pool(conn)

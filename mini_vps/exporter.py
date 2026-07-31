@@ -6,6 +6,7 @@
 pull を待ち受ける。
 """
 
+import logging
 import os
 import threading
 
@@ -14,7 +15,10 @@ from prometheus_client import REGISTRY, start_http_server
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 from .config import LIBVIRT_URI
+from .logging_config import configure as configure_logging
 from .manager import STATE_NAMES, ServerManager, register_quiet_error_handler
+
+_LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_PORT = 9177
 _PORT_ENV_VAR = "MINIVPS_EXPORTER_PORT"
@@ -178,7 +182,8 @@ class DomainCollector:
             if self._mgr is None:
                 self._mgr = self._manager_factory()
             all_stats = self._mgr.conn.getAllDomainStats()
-        except libvirt.libvirtError:
+        except libvirt.libvirtError as e:
+            _LOGGER.warning("統計の取得に失敗、接続を張り直す: %s", e)
             self._drop_manager()
             scrape_success.add_metric([], 0.0)
             yield scrape_success
@@ -245,10 +250,12 @@ def main() -> None:
     port = int(os.environ.get(_PORT_ENV_VAR, _DEFAULT_PORT))
     addr = os.environ.get(_ADDR_ENV_VAR, _DEFAULT_ADDR)
 
+    configure_logging()
     register_quiet_error_handler()
     REGISTRY.register(DomainCollector())
 
     start_http_server(port, addr=addr)
+    _LOGGER.info("エクスポーターを起動した %s:%d", addr, port)
     threading.Event().wait()
 
 

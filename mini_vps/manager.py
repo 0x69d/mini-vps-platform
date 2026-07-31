@@ -4,6 +4,8 @@ libvirt domain の <metadata> 要素に spec を埋め込むことで、自前 D
 get / list を成立させる。各メソッドは lifecycle の実行部品の薄いラッパー。
 """
 
+import contextlib
+import logging
 import threading
 import xml.etree.ElementTree as ET
 
@@ -22,6 +24,8 @@ from .resources import (
     set_domain_filterref_xml,
 )
 from .spec import ServerSpec, read_pubkey
+
+_LOGGER = logging.getLogger(__name__)
 
 # create() が停止中の既存 VM に対して収束(defineXML の最小差分編集)を許す
 # フィールド。それ以外のフィールドの差分は ServerConflict で拒否する。
@@ -45,14 +49,33 @@ STATE_NAMES = {
 }
 
 
+def _log_libvirt_error(ctx, err) -> None:
+    """C 層から上がってきた libvirt エラーを DEBUG ログへ落とす。
+
+    err は文字列ではなく (code, domain, message, level, str1, str2, str3,
+    int1, int2) の9要素リストで、err[2] がメッセージ本文。リストのまま渡すと
+    9フィールドがそのまま出力されるため message だけを取り出す。
+
+    Args:
+        ctx: registerErrorHandler に渡した任意のコンテキスト。使わない。
+        err: libvirt のエラー情報リスト。
+    """
+    _LOGGER.debug("libvirt: %s", err[2])
+
+
 def register_quiet_error_handler() -> None:
-    """既定の libvirt エラーハンドラを抑制する。
+    """既定の libvirt エラーハンドラを DEBUG ログ出力に差し替える。
 
     VIR_ERR_NO_DOMAIN 等を正常系として Python 側で捕捉していても、libvirt は
     既定で全エラーを無条件に C 層から stderr へ出力する。`libvirt.open()` より前に
-    一度呼び出すことでその出力を抑制する(Python 側の例外処理自体は変更しない)。
+    一度呼び出すことでその出力を止める。Python 側の例外処理自体は変更しない。
+
+    捨てるのではなく DEBUG へ落とすのは、_lookup / _is_managed が正常系として
+    握りつぶすエラーに紛れて、本当に知りたい一次情報まで失われるのを避けるため。
+    既定レベルでは表示されず、-vv で復元できる。list() は管理対象外 domain 1台
+    ごとに1行出すため、DEBUG では相応の量になる。
     """
-    libvirt.registerErrorHandler(lambda ctx, err: None, None)
+    libvirt.registerErrorHandler(_log_libvirt_error, None)
 
 
 def _write_spec(dom, spec: dict) -> None:
@@ -216,6 +239,26 @@ class ServerManager:
         with self._locks_guard:
             return self._locks.setdefault(name, threading.Lock())
 
+    @contextlib.contextmanager
+    def _locked(self, name: str):
+        """指定 name のロックを取得し、待たされた場合はその事実を DEBUG に残す。
+
+        まず非ブロッキングで試し、取れなければ待ち始める旨を出してからブロッキングで
+        取り直す。待ち行列に入る前に他スレッドが割り込みうるが、直列化される結果は
+        blocking な acquire() 1回と変わらない。ログのためだけの2段構えである。
+
+        Yields:
+            None。
+        """
+        lock = self._lock_for(name)
+        if not lock.acquire(blocking=False):
+            _LOGGER.debug("%s: ロック待ち", name)
+            lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+
     def create(
         self, spec: dict, secrets: dict[str, str] | None = None
     ) -> tuple[dict, bool]:
@@ -248,16 +291,19 @@ class ServerManager:
             ServerRunning: 可変フィールドの差分があり、対象 VM が起動中の場合。
         """
         name = spec["name"]
-        with self._lock_for(name):
+        with self._locked(name):
             existing = _find_domain(self.conn, name)
             if existing is None:
+                _LOGGER.info("%s: 新規作成を開始", name)
                 try:
                     dom = provision(self.conn, spec, secrets=secrets)
                     _write_spec(dom, spec)
                     dom.create()
                 except Exception:
+                    _LOGGER.error("%s: 新規作成に失敗、巻き戻す", name)
                     teardown(self.conn, {"name": name})
                     raise
+                _LOGGER.info("%s: 新規作成が完了", name)
                 # DNS 登録は VM 作成成功が確定した後(try/except の外)で行う。
                 # register は例外を送出しない契約(ベストエフォート)だが、
                 # 仮に失敗しても teardown 巻き戻しを誘発しない位置に置く。
@@ -272,6 +318,7 @@ class ServerManager:
             # デフォルトを補完し、同じ YAML の再 create が差分扱いにならないようにする。
             old_spec = ServerSpec(**_read_spec(existing)).model_dump()
             if old_spec == spec:
+                _LOGGER.info("%s: 既存と一致、変更なし", name)
                 return self.get(name), False
 
             diff_keys = {k for k, v in spec.items() if old_spec.get(k) != v}
@@ -280,6 +327,7 @@ class ServerManager:
             if existing.isActive():
                 raise ServerRunning(name)
 
+            _LOGGER.info("%s: 差分を収束 fields=%s", name, sorted(diff_keys))
             dom = self._converge(existing, old_spec, spec, diff_keys)
             # _write_spec が失敗しても domain 実体側はロールバックしない。_converge の
             # 各操作(resize/filterref 設定/nwfilter 定義・削除)は全遷移パターンで冪等
@@ -325,6 +373,7 @@ class ServerManager:
             f.name() for f in self.conn.listAllNWFilters()
         }:
             self.conn.nwfilterLookupByName(filter_name).undefine()
+            _LOGGER.debug("nwfilter %s を削除", filter_name)
 
         return dom
 
@@ -380,14 +429,16 @@ class ServerManager:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
         """
         # create と同じ name ロックで直列化し、作成途中の VM への delete 競合を防ぐ
-        with self._lock_for(name):
+        with self._locked(name):
             dom = _lookup(self.conn, name)
+            _LOGGER.info("%s: 削除を開始", name)
             # DNS レコードの削除に使う IP は teardown で metadata ごと消える前に
             # 読んでおく。unregister は teardown 成功後にのみ呼ぶ。teardown が
             # 失敗した=VM が残っているのに名前だけ消える事故を防ぐため。
             spec = _read_spec(dom)
             teardown(self.conn, {"name": name})
             dns_registration.unregister(spec)
+            _LOGGER.info("%s: 削除が完了", name)
 
     def start(self, name: str) -> dict:
         """管理対象の VM を起動する。
@@ -402,11 +453,14 @@ class ServerManager:
         Raises:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
         """
-        with self._lock_for(name):
+        with self._locked(name):
             dom = _lookup(self.conn, name)
             if not dom.isActive():
                 ensure_network_active(self.conn, _read_spec(dom))
                 dom.create()
+                _LOGGER.info("%s: 起動した", name)
+            else:
+                _LOGGER.info("%s: 既に起動中、変更なし", name)
             return self.get(name)
 
     def stop(self, name: str, force: bool = False) -> dict:
@@ -424,10 +478,13 @@ class ServerManager:
         Raises:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
         """
-        with self._lock_for(name):
+        with self._locked(name):
             dom = _lookup(self.conn, name)
             if dom.isActive():
                 dom.destroy() if force else dom.shutdown()
+                _LOGGER.info("%s: 停止を要求 force=%s", name, force)
+            else:
+                _LOGGER.info("%s: 既に停止中、変更なし", name)
             return self.get(name)
 
     def restart(self, name: str, force: bool = False) -> dict:
@@ -448,7 +505,7 @@ class ServerManager:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
             ServerNotRunning: force=False で対象 VM が停止中の場合。
         """
-        with self._lock_for(name):
+        with self._locked(name):
             dom = _lookup(self.conn, name)
             if force:
                 if dom.isActive():
@@ -459,6 +516,7 @@ class ServerManager:
                 if not dom.isActive():
                     raise ServerNotRunning(name)
                 dom.reboot()
+            _LOGGER.info("%s: 再起動を要求 force=%s", name, force)
             return self.get(name)
 
     def reinstall(self, name: str, secrets: dict[str, str] | None = None) -> dict:
@@ -481,9 +539,10 @@ class ServerManager:
         Raises:
             ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
         """
-        with self._lock_for(name):
+        with self._locked(name):
             dom = _lookup(self.conn, name)
             spec = _read_spec(dom)
+            _LOGGER.info("%s: 再インストールを開始", name)
 
             # overlay 再作成(破壊的)より前に seed を作り直す
             build_seed_iso(self.conn, spec, read_pubkey(), secrets=secrets)
@@ -499,4 +558,5 @@ class ServerManager:
             # register は delete→add の冪等な組であり無害。DNS 有効化前に
             # 作った VM のレコードを後追い補充する復旧手段としても機能する。
             dns_registration.register(spec)
+            _LOGGER.info("%s: 再インストールが完了", name)
             return self.get(name)

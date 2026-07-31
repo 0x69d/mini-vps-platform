@@ -46,11 +46,33 @@ spec(YAML/JSON) → parse → XML → libvirt define/start という一方向の
 - `resources.py` — pool / overlay volume / seed ISO / domain XML / nwfilter XML の生成。
   純粋関数(`build_domain_xml`・`build_nwfilter_xml`・`_filter_name`)と、libvirt/subprocess を伴う関数が同居。
 - `config.py` — 定数(`LIBVIRT_URI` 含む)と XML/cloud-init テンプレート。
+- `logging_config.py` — 入口層が共有するログ設定。`configure(level)` / `resolve_level(level)`。
 - 入口 — CLI: `cli.py`(manager の例外を終了コードへ正規化。`__main__.py` は `cli.run` への
   shim)、Web API: `api.py`(manager の例外を HTTP ステータスへ正規化)、
   Prometheus エクスポーター: `exporter.py`(`ServerManager` を読み取り専用で再利用し、
   `conn.getAllDomainStats()` の一括統計を `prometheus_client` の Custom Collector として公開)。
   CLI と Web API はどちらも `ServerManager` の薄いラッパーという対称な関係にある。
+
+## ログ
+
+層で役割を分ける。ライブラリ層(`manager`/`lifecycle`/`resources`/`dns_registration`)は
+`logging.getLogger(__name__)` を持つだけで出力先もレベルも決めない。決めるのは入口層で、
+`logging_config.configure()` を1度だけ呼ぶ。ライブラリ層で `basicConfig` を呼ぶと、
+import した全アプリのログ設定を上書きするため禁止。
+
+`configure()` はルートではなく `mini_vps` ロガーだけを設定し、そこに stderr ハンドラを付ける。
+uvicorn がハンドラを付けるのは `uvicorn` 系ロガーだけでルートには付けないため、伝播に任せると
+INFO 以下が出力先を持たず消える。3入口とも同じ `configure()` を呼ぶ。`propagate` は True のまま
+残す(ルートに既定でハンドラが無いので出力は増えず、`caplog` がレコードを拾える)。
+CLI は `-v`(INFO)/`-vv`(DEBUG)、レベルの既定は環境変数 `MINIVPS_LOG_LEVEL`、
+未設定なら WARNING。
+
+出力先の分離を壊さないこと。CLI の stdout はコマンド結果専用で、ログは stderr へ出す。
+
+> [!WARNING]
+> spec 本文・user-data 本文・secrets はログに出さない。出してよいのは name・network 名など
+> libvirt metadata に既に載っている値だけ。`startup_scripts.py` が守っている
+> 「secrets を spec/metadata に載せない」という不変条件は、ログから容易に破れる。
 
 ## コーディング規約
 
@@ -72,6 +94,11 @@ libvirt 接続・subprocess に依存する関数は `unittest.mock`(`MagicMock`
 `manager_factory` に `ServerManager` の Mock を返すコンテキストマネージャを注入して検証する
 (`dependency_overrides` の CLI 版)。実 libvirtd・`cloud-localds` バイナリを要する結合的な
 動作確認は、別途手動または統合実行で行う。
+
+ログは `caplog` フィクスチャで検証する。`configure()` を呼ぶテストは `mini_vps` ロガーの
+handlers と level を退避・復元する(`tests/test_logging_config.py` の `_restore_logger` 参照)。
+secrets がログに漏れないことは DEBUG レベルで検証する
+(`test_manager.py::test_create_does_not_log_secrets`)。
 
 ## 外部依存・前提(統合実行時のみ)
 
