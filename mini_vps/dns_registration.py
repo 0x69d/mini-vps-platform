@@ -2,15 +2,14 @@
 
 3つの環境変数(MINIVPS_DNS_SERVER / MINIVPS_DNS_ZONE /
 MINIVPS_DNS_TSIG_KEY_FILE)がすべて設定されているときのみ有効になり、
-1つでも欠ければ機能全体が完全に無効(既存挙動と同一)になる。DNS 操作は
-BIND 付属の nsupdate CLI を subprocess で呼ぶ薄い層とし、dnspython 等の
-追加依存は入れない(cloud-localds を subprocess で呼ぶ
-resources.build_seed_iso() と同型)。
+1つでも欠ければ機能全体が完全に無効になる。
+DNS 操作はBIND 付属の nsupdate CLI を subprocess で呼ぶ薄い層とし、
+dnspython 等の追加依存は入れない。cloud-localds を subprocess で呼ぶ
+resources.build_seed_iso() と同型。
 
-公開関数(register / unregister)は例外を一切送出しない(ベストエフォート
-契約)。DNS の失敗で VM の create/delete を失敗させると、dns-1 自身の
-再作成すら不可能になる循環依存が生じるため、失敗は警告ログにとどめる
-(設計判断の詳細は docs/dns-registration.md)。
+公開関数(register / unregister)は例外を一切送出しないベストエフォート。
+DNS の失敗で VM の create/delete を失敗させると、dns-1 自身の
+再作成すら不可能になる循環依存が生じるため、失敗は警告ログにとどめる。
 
 TSIG 鍵は環境変数で受けたファイルパスを nsupdate の -k にそのまま渡すだけで、
 本モジュールはファイルを開かない。鍵の中身は spec・libvirt metadata・ログ・
@@ -19,7 +18,7 @@ TSIG 鍵は環境変数で受けたファイルパスを nsupdate の -k にそ�
 警告の出力には CLI 入口層の print() ではなく logging を使う。manager 層は
 CLI / API / exporter の3入口から共有されるライブラリ層であり、logging 未設定の
 CLI でも標準の last-resort ハンドラが WARNING 以上を stderr に出すため体験は
-print と同等、API(uvicorn)配下ではログ基盤に統合できる。
+print と同等、API 配下ではログ基盤に統合できる。
 """
 
 import ipaddress
@@ -44,13 +43,13 @@ _RECORD_TTL = 300
 def _config() -> tuple[str, str, str] | None:
     """環境変数から DNS 登録の設定を読む。
 
-    呼び出しのたびに読む(import 時に固定しない)ことで、テストの
-    monkeypatch.setenv や API 常駐プロセスでの設定変更に追随する。
+    呼び出しのたびに読むことで、テストの monkeypatch.setenv や
+    API 常駐プロセスでの設定変更に追随する。
 
     Returns:
-        3変数すべてが設定されていれば (server, zone, key_file)。zone は
-        末尾ドットを除去して正規化する。1つでも欠けていれば None
-        (機能全体が無効)。
+        3変数すべてが設定されていれば (server, zone, key_file)。
+        zone は末尾ドットを除去して正規化する。1つでも欠けていれば
+        None となり、機能全体が無効。
     """
     server = os.environ.get(_DNS_SERVER_ENV_VAR)
     zone = os.environ.get(_DNS_ZONE_ENV_VAR)
@@ -63,9 +62,9 @@ def _config() -> tuple[str, str, str] | None:
 def _first_static_ipv4(spec: dict) -> str | None:
     """spec["networks"] の先頭から最初の静的NICの IPv4 アドレスを返す。
 
-    manager._static_ipv4() と同じ規約(status/get が表示する管理IPと
-    登録される A レコードを一致させる)。依存方向を manager →
-    dns_registration の一方向に保つため import はせず、同じ走査を持つ。
+    manager._static_ipv4() と同じ規約、status/get が表示する管理IPと
+    登録される A レコードを一致させる。依存方向を manager → dns_registration
+    の一方向に保つため import はしない。
     """
     for net in spec.get("networks", []):
         if isinstance(net, dict) and net.get("address"):
@@ -81,7 +80,7 @@ def _names(zone: str, name: str, ip: str) -> tuple[str, str]:
 
 
 def _run_nsupdate(script: str, key_file: str, name: str, action: str) -> None:
-    """TSIG 鍵付きで nsupdate を実行し、失敗は警告ログに落とす(例外は送出しない)。
+    """TSIG 鍵付きで nsupdate を実行し、失敗は警告ログに落とす。例外は送出しない。
 
     Args:
         script: nsupdate の stdin に渡すコマンド列。
@@ -121,15 +120,14 @@ def _run_nsupdate(script: str, key_file: str, name: str, action: str) -> None:
 
 
 def register(spec: dict) -> None:
-    """VM の A レコードと PTR レコードを登録する(opt-in・ベストエフォート)。
+    """VM の A レコードと PTR レコードを登録する。
 
     最初の静的NICの IP で <name>.<zone> の A と対応する PTR を登録する。
-    既存レコードを update delete してから add する冪等な組で書くため、
-    reinstall や再実行でも重複しない。A と PTR は別ゾーンのため send を
-    2回に分ける(RFC 2136 の動的更新は1メッセージ=1ゾーン)。
+    既存レコードを update delete してから add するため、 reinstall や
+    再実行でも重複しない。A と PTR は別ゾーンのため send を2回に分ける。
 
-    静的NICが1つも無い VM はスキップし、その旨をログに残す。失敗しても
-    例外は送出しない。
+    静的NICが1つも無い VM はスキップし、その旨をログに残す。
+    失敗しても例外は送出しない。
 
     Args:
         spec: ServerSpec の model_dump 形式の dict。
@@ -157,11 +155,11 @@ def register(spec: dict) -> None:
 
 
 def unregister(spec: dict) -> None:
-    """VM の A レコードと PTR レコードを削除する(opt-in・ベストエフォート)。
+    """VM の A レコードと PTR レコードを削除する。
 
     register と同じ規約(最初の静的NIC)で対象レコードを特定して削除する。
-    静的NICが無い VM は登録もされていないためスキップする。失敗しても
-    例外は送出しない。
+    静的NICが無い VM は登録もされていないためスキップする。
+    失敗しても例外は送出しない。
 
     Args:
         spec: ServerSpec の model_dump 形式の dict。

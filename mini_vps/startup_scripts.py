@@ -23,7 +23,7 @@ def _render_opencode_sakura_ai_engine(spec: dict, secrets: dict[str, str]) -> di
 
     cloud-init は write-files モジュールが users-groups モジュールより先に走るため、
     対象ユーザーはまだ存在しない。よって root 所有のステージング先に書き出し、
-    runcmd(ユーザー作成後)で対象ユーザーのホームへ移動・chown する。
+    runcmdで対象ユーザーのホームへ移動・chown する。
 
     Raises:
         StartupScriptError: secrets に AI_ENGINE_TOKEN が無い、または空文字の場合。
@@ -39,7 +39,7 @@ def _render_opencode_sakura_ai_engine(spec: dict, secrets: dict[str, str]) -> di
     home_dir = f"/home/{user}/.config/opencode"
 
     # "{env:AI_ENGINE_TOKEN}" は OpenCode 自身が解釈するプレースホルダ文字列であり、
-    # Python 側の文字列フォーマットには一切通さない(dict リテラル→json.dumps のみ)。
+    # Python 側の文字列フォーマットには一切通さない。
     opencode_config = {
         "$schema": "https://opencode.ai/config.json",
         "model": "sakura-ai-engine/gpt-oss-120b",

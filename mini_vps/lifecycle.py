@@ -28,7 +28,7 @@ def provision(conn, spec, secrets: dict[str, str] | None = None) -> libvirt.virD
     """VM を定義し、未起動の domain を返す。
 
     nwfilter(任意) → seed → overlay → domain XML → defineXML の順に処理する。
-    起動は呼び出し側が行う(起動前に metadata を付与するため)。seed を overlay
+    起動前に metadata を付与するため、起動は呼び出し側が行う。seed を overlay
     より先に作るのは、secrets 不足を安価に検知するため。
     """
     ensure_network_active(conn, spec)
@@ -84,8 +84,8 @@ def teardown(conn, spec) -> None:
         dom.undefineFlags(libvirt.VIR_DOMAIN_UNDEFINE_NVRAM)
 
     # nwfilter は使用中(domain にアタッチ中)は undefine できないため、domain の
-    # undefine 後、かつ domain ブロックとは独立に判定する(provision 内で
-    # nwfilterDefineXML だけ成功し以降が失敗したロールバック経路でも回収できるように)。
+    # undefine 後、かつ domain ブロックとは独立に判定する。provision 内で
+    # nwfilterDefineXML だけ成功し以降が失敗したロールバック経路でも回収するため。
     filter_name = _filter_name(spec)
     if filter_name in {f.name() for f in conn.listAllNWFilters()}:
         conn.nwfilterLookupByName(filter_name).undefine()

@@ -1,7 +1,7 @@
 ---
 # 対応可能なゲストOSの一覧(docs/guest-os.md と対応)。
-# fetch: true のエントリのみ tasks/base_images.yml が自動ダウンロードする
-# (既定ダウンロードは最小限に留め、他は必要になったとき fetch: true に変える)。
+# fetch: true のエントリのみ tasks/base_images.yml が自動ダウンロードする。
+# 既定ダウンロードは最小限に留め、他は必要になったとき fetch: true に変える。
 # verified: true は実機で起動・IPリース・SSHログインまで確認済みであることを示す。
 guest_images:
   - name: ubuntu-26.04.img
