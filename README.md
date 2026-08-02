@@ -324,14 +324,14 @@ uv run mini-vps delete web-1
 | サブコマンド | 説明 |
 |---|---|
 | `create <file>` | spec YAML から VM を宣言的に作成・収束する |
-| `get <name>` | spec と状態を表示する(不在なら終了コード 2) |
+| `get <name>` | spec と状態を表示する(不在なら終了コード 3) |
 | `list` | 管理対象の VM 名を1行ずつ表示する |
-| `status <name>` | 状態(state・ip)を表示する(不在なら終了コード 2) |
-| `start <name>` | VM を起動する(起動中なら冪等に no-op、不在なら終了コード 2) |
-| `stop <name> [--force]` | VM を停止する(停止中なら冪等に no-op、不在なら終了コード 2) |
-| `restart <name> [--force]` | disk を保持したまま VM を再起動する(不在なら終了コード 2) |
-| `delete <name>` | VM を削除する(不在/管理外なら終了コード 2) |
-| `reinstall <name>` | disk を base から作り直して再起動する(不在なら終了コード 2) |
+| `status <name>` | 状態(state・ip)を表示する(不在なら終了コード 3) |
+| `start <name>` | VM を起動する(起動中なら冪等に no-op、不在なら終了コード 3) |
+| `stop <name> [--force]` | VM を停止する(停止中なら冪等に no-op、不在なら終了コード 3) |
+| `restart <name> [--force]` | disk を保持したまま VM を再起動する(不在なら終了コード 3) |
+| `delete <name>` | VM を削除する(不在/管理外なら終了コード 3) |
+| `reinstall <name>` | disk を base から作り直して再起動する(不在なら終了コード 3) |
 
 `create`/`reinstall` はどちらも `--startup-param KEY=VALUE`(複数回指定可)を
 受け付ける。`startup_script` テンプレートに渡す秘密情報の指定方法は
@@ -339,14 +339,30 @@ uv run mini-vps delete web-1
 
 `stop`/`restart` の既定はゲスト OS への ACPI 経由の正常なシャットダウン/再起動の
 要求のみで、実際に状態が変わるまで待たない。`--force` 指定時は即座に強制する。
-停止中の VM に `restart`(force 無し)を実行すると終了コード 4(`ServerNotRunning`)
+停止中の VM に `restart`(force 無し)を実行すると終了コード 5(`ServerNotRunning`)
 で拒否する。
 
 `create` を既存 VM に対して再実行すると、`memory`/`vcpus`/`filters` の差分のみ
-収束させる(それ以外のフィールドの差分は spec 相違として終了コード 3
+収束させる(それ以外のフィールドの差分は spec 相違として終了コード 4
 (`ServerConflict`)で拒否する)。収束はドメイン停止中の VM のみ許可し、
-稼働中に実行すると終了コード 5(`ServerRunning`)で拒否する(先に `stop` してから
+稼働中に実行すると終了コード 6(`ServerRunning`)で拒否する(先に `stop` してから
 再実行する)。
+
+#### 終了コード
+
+| コード | 意味 |
+|---|---|
+| 0 | 成功 |
+| 1 | spec ファイル関連のエラー(検証エラー・YAML 構文・入出力・`--startup-param` 形式不正) |
+| 2 | コマンドラインの使用法エラー(不明なオプション、引数不足) |
+| 3 | `ServerNotFound` — 対象 VM が存在しない、または管理対象外 |
+| 4 | `ServerConflict` — 既存 VM の spec と不一致 |
+| 5 | `ServerNotRunning` — 停止中の VM に稼働前提の操作を要求した |
+| 6 | `ServerRunning` — 稼働中の VM に停止前提の操作を要求した |
+| 7 | libvirt エラー(`libvirtd` 停止・接続不可など) |
+
+1 は入力(spec ファイル・`--startup-param`)の誤り、3 以降は VM の状態に起因する
+拒否を表す。2 は Click(Typer の基盤)が `UsageError` に予約しているため使わない。
 
 ### 4. Web API(JSON)
 
@@ -381,6 +397,12 @@ JSON body に `{"force": true}` を渡し、状態変化は `GET /servers/{name}
 
 収束の挙動は CLI の `create`(上記参照)と同じ。API では `ServerConflict`・
 `ServerRunning` のどちらも 409 で返る。
+
+エラーの正規化は CLI の終了コードと対応させている。入力の誤りは 422(CLI の 1)、
+`ServerNotFound` は 404(3)、`ServerConflict`・`ServerNotRunning`・`ServerRunning` は
+409(4・5・6)、起動後に libvirt 側の障害が起きた場合は 503(7)で返る。libvirt 接続は
+プロセス起動時に一度だけ開くため、起動時点で `libvirtd` が停止していれば
+503 ではなくプロセスの起動自体が失敗する。
 
 ### 5. Prometheus エクスポーター
 

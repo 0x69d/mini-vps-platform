@@ -3,6 +3,7 @@ import json
 import logging
 from unittest.mock import MagicMock
 
+import libvirt
 import pytest
 
 from mini_vps import cli
@@ -136,12 +137,12 @@ def test_get_prints_json(mock_manager, capsys):
     assert json.loads(capsys.readouterr().out) == mock_manager.get.return_value
 
 
-def test_get_returns_exit_code_2_when_not_found(mock_manager, capsys):
+def test_get_returns_exit_code_3_when_not_found(mock_manager, capsys):
     mock_manager.get.side_effect = ServerNotFound("web-1")
 
     exit_code = cli.main(["get", "web-1"], manager_factory=_factory(mock_manager))
 
-    assert exit_code == 2
+    assert exit_code == 3
     assert "web-1" in capsys.readouterr().err
 
 
@@ -170,12 +171,12 @@ def test_start_prints_json(mock_manager, capsys):
     assert json.loads(capsys.readouterr().out) == mock_manager.start.return_value
 
 
-def test_start_returns_exit_code_2_when_not_found(mock_manager):
+def test_start_returns_exit_code_3_when_not_found(mock_manager):
     mock_manager.start.side_effect = ServerNotFound("web-1")
 
     exit_code = cli.main(["start", "web-1"], manager_factory=_factory(mock_manager))
 
-    assert exit_code == 2
+    assert exit_code == 3
 
 
 # --- stop ---
@@ -226,12 +227,12 @@ def test_restart_forwards_force_flag(mock_manager):
     mock_manager.restart.assert_called_once_with("web-1", force=True)
 
 
-def test_restart_returns_exit_code_4_when_not_running(mock_manager, capsys):
+def test_restart_returns_exit_code_5_when_not_running(mock_manager, capsys):
     mock_manager.restart.side_effect = ServerNotRunning("web-1")
 
     exit_code = cli.main(["restart", "web-1"], manager_factory=_factory(mock_manager))
 
-    assert exit_code == 4
+    assert exit_code == 5
     assert "web-1" in capsys.readouterr().err
 
 
@@ -246,12 +247,12 @@ def test_delete_calls_manager_and_prints_message(mock_manager, capsys):
     assert "web-1" in capsys.readouterr().out
 
 
-def test_delete_returns_exit_code_2_when_not_found(mock_manager):
+def test_delete_returns_exit_code_3_when_not_found(mock_manager):
     mock_manager.delete.side_effect = ServerNotFound("web-1")
 
     exit_code = cli.main(["delete", "web-1"], manager_factory=_factory(mock_manager))
 
-    assert exit_code == 2
+    assert exit_code == 3
 
 
 # --- reinstall ---
@@ -285,7 +286,7 @@ def test_create_reads_yaml_file_and_calls_manager(mock_manager, tmp_path):
     assert called_spec["memory"] == 1024
 
 
-def test_create_returns_exit_code_3_on_conflict(mock_manager, tmp_path):
+def test_create_returns_exit_code_4_on_conflict(mock_manager, tmp_path):
     mock_manager.create.side_effect = ServerConflict("web-1")
     spec_file = tmp_path / "vm.yaml"
     spec_file.write_text(SPEC_YAML)
@@ -294,10 +295,10 @@ def test_create_returns_exit_code_3_on_conflict(mock_manager, tmp_path):
         ["create", str(spec_file)], manager_factory=_factory(mock_manager)
     )
 
-    assert exit_code == 3
+    assert exit_code == 4
 
 
-def test_create_returns_exit_code_5_when_running(mock_manager, tmp_path):
+def test_create_returns_exit_code_6_when_running(mock_manager, tmp_path):
     """可変フィールド差分の収束は稼働中の VM には適用できない。"""
     mock_manager.create.side_effect = ServerRunning("web-1")
     spec_file = tmp_path / "vm.yaml"
@@ -307,7 +308,7 @@ def test_create_returns_exit_code_5_when_running(mock_manager, tmp_path):
         ["create", str(spec_file)], manager_factory=_factory(mock_manager)
     )
 
-    assert exit_code == 5
+    assert exit_code == 6
 
 
 def test_create_returns_exit_code_1_when_file_missing(mock_manager, tmp_path):
@@ -394,3 +395,44 @@ def test_reinstall_forwards_startup_params_as_secrets(mock_manager):
     mock_manager.reinstall.assert_called_once_with(
         "web-1", secrets={"AI_ENGINE_TOKEN": "sk-abc"}
     )
+
+
+# --- 終了コード ---
+
+
+def test_libvirt_error_returns_exit_code_7_with_message(mock_manager, capsys):
+    """操作中の libvirtError は traceback ではなく error 行と専用コードにする。"""
+    mock_manager.list.side_effect = libvirt.libvirtError("internal error")
+
+    exit_code = cli.main(["list"], manager_factory=_factory(mock_manager))
+
+    assert exit_code == 7
+    assert "internal error" in capsys.readouterr().err
+
+
+def test_libvirt_error_from_connection_returns_exit_code_7(monkeypatch, capsys):
+    """libvirtd 停止時の接続失敗も 7 にする(既定 factory 経由)。
+
+    接続の確立は _run_command の try の中でしか行われない。ここを try の外へ
+    出すリファクタは traceback を復活させるため、既定 factory で回帰を止める。
+    """
+    monkeypatch.setattr(cli, "register_quiet_error_handler", lambda: None)
+    monkeypatch.setattr(
+        cli.libvirt,
+        "open",
+        MagicMock(side_effect=libvirt.libvirtError("failed to connect")),
+    )
+
+    exit_code = cli.main(["list"])
+
+    assert exit_code == 7
+    assert "failed to connect" in capsys.readouterr().err
+
+
+def test_usage_error_keeps_exit_code_2_reserved_for_typer(mock_manager):
+    """2 は Click の UsageError 専用。ドメイン例外と衝突しないことを守る。"""
+    exit_code = cli.main(
+        ["get", "web-1", "--no-such-flag"], manager_factory=_factory(mock_manager)
+    )
+
+    assert exit_code == 2

@@ -4,6 +4,7 @@
 manager の例外は exception_handler で HTTP ステータスへ正規化する。
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 import libvirt
@@ -23,6 +24,8 @@ from .manager import (
 )
 from .spec import ServerSpec, ServerSpecInput
 from .startup_scripts import StartupScriptError
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -113,6 +116,21 @@ async def _startup_script_error_handler(
     return JSONResponse(
         status_code=422, content={"detail": f"startup script error: {exc}"}
     )
+
+
+@app.exception_handler(libvirt.libvirtError)
+async def _libvirt_error_handler(
+    request: Request, exc: libvirt.libvirtError
+) -> JSONResponse:
+    """ホスト側の libvirtError を 503 に変換する(CLI の終了コード 7 と対応する)。
+
+    他のハンドラと違いクライアント起因ではなくホスト側の障害のため、
+    レスポンスだけでは運用者の手元に残らない。ここでログにも残す。
+    ただし libvirt のメッセージは base_image パスなど spec の値を含みうるため、
+    ログにはパスだけを書き、本文はレスポンスの detail にのみ載せる。
+    """
+    logger.warning("libvirt error on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=503, content={"detail": f"libvirt error: {exc}"})
 
 
 @app.get("/servers")
