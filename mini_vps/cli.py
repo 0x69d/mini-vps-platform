@@ -127,7 +127,8 @@ def _run_command(func):
     api.py の @app.exception_handler(...) と対称に、例外を
     「HTTP ステータス」ではなく「終了コード」へ変換する。引数不足など
     純粋な Typer の使用法エラーはここでは扱わず、Typer の既定動作
-    (終了コード2, Usage 表示)に委ねる。
+    (終了コード 2, Usage 表示)に委ねる。1 は入力(spec ファイル・
+    --startup-param)の誤り、3 以降は VM の状態に起因する拒否に割り当てる。
     """
 
     @functools.wraps(func)
@@ -139,16 +140,21 @@ def _run_command(func):
                 result = func(ctx, *args, **kwargs)
         except ServerNotFound as e:
             print(f"error: server not found: {e}", file=sys.stderr)
-            raise typer.Exit(code=2) from None
+            raise typer.Exit(code=3) from None
         except ServerConflict as e:
             print(f"error: server conflict: {e}", file=sys.stderr)
-            raise typer.Exit(code=3) from None
+            raise typer.Exit(code=4) from None
         except ServerNotRunning as e:
             print(f"error: server not running: {e}", file=sys.stderr)
-            raise typer.Exit(code=4) from None
+            raise typer.Exit(code=5) from None
         except ServerRunning as e:
             print(f"error: server running: {e}", file=sys.stderr)
-            raise typer.Exit(code=5) from None
+            raise typer.Exit(code=6) from None
+        except libvirt.libvirtError as e:
+            # register_quiet_error_handler() が libvirt 自身の stderr を抑止するため、
+            # ここで出さないと libvirtd 停止時に traceback だけが残る。
+            print(f"error: libvirt: {e}", file=sys.stderr)
+            raise typer.Exit(code=7) from None
         except (ValidationError, yaml.YAMLError, OSError, StartupScriptError) as e:
             print(f"error: {e}", file=sys.stderr)
             raise typer.Exit(code=1) from None
@@ -261,10 +267,19 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
             ためのフック(既定は libvirt 接続を開閉する `_open_manager`)。
 
     Returns:
-        プロセス終了コード(成功 0、ServerNotFound 2、ServerConflict 3、
-        ServerNotRunning 4、ServerRunning 5(create が可変フィールド差分を
-        起動中の VM に適用しようとした場合を含む)、spec ファイル関連のエラー 1、
-        Typer の使用法エラー 2)。
+        プロセス終了コード。
+
+        - 0: 成功
+        - 1: spec ファイル関連のエラー(ValidationError / YAML / OSError /
+          StartupScriptError)
+        - 2: Typer の使用法エラー専用。Click の `UsageError.exit_code` が
+          この値を予約しているため、ドメイン例外には割り当てない
+        - 3: ServerNotFound
+        - 4: ServerConflict
+        - 5: ServerNotRunning
+        - 6: ServerRunning(create が可変フィールド差分を起動中の VM に
+          適用しようとした場合を含む)
+        - 7: libvirtError(libvirtd 停止・接続不可など)
     """
     factory = manager_factory or _open_manager
     try:

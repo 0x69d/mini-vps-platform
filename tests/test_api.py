@@ -1,5 +1,7 @@
+import logging
 from unittest.mock import MagicMock
 
+import libvirt
 import pytest
 from fastapi.testclient import TestClient
 
@@ -257,6 +259,36 @@ def test_reinstall_server_forwards_secrets_from_body(client):
     mock_manager.reinstall.assert_called_once_with(
         "web-1", secrets={"AI_ENGINE_TOKEN": "sk-abc"}
     )
+
+
+# --- libvirtError ---
+
+
+def test_libvirt_error_returns_503(client, caplog):
+    """libvirtd 停止などのホスト側障害を 503 に正規化する(CLI の終了コード 7)。"""
+    test_client, mock_manager = client
+    mock_manager.list.side_effect = libvirt.libvirtError("failed to connect")
+
+    with caplog.at_level(logging.WARNING, logger="mini_vps.api"):
+        response = test_client.get("/servers")
+
+    assert response.status_code == 503
+    assert "failed to connect" in response.json()["detail"]
+    assert "/servers" in caplog.text
+
+
+def test_libvirt_error_does_not_log_message_body(client, caplog):
+    """libvirt のメッセージは spec の値を含みうるためログに出さない。"""
+    test_client, mock_manager = client
+    mock_manager.create.side_effect = libvirt.libvirtError(
+        "cannot open '/var/lib/libvirt/images/secret-base.img'"
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="mini_vps"):
+        response = test_client.put("/servers/web-1", json=PUT_BODY)
+
+    assert response.status_code == 503
+    assert "secret-base.img" not in caplog.text
 
 
 def test_lifespan_configures_logging(monkeypatch):
