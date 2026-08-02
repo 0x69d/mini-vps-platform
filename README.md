@@ -5,6 +5,16 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 宣言的な YAML 入力を受け取り、ローカルマシン上に仮想サーバーをプロビジョニングする。
 クラウドでいう「コントロールプレーン」の中核、つまり宣言的入力からリソース確保までの翻訳を自作する。
 
+## 関連リポジトリ
+
+本リポジトリの機能だけで実現するアプライアンス VM 群。いずれも本体のコードを変更せず、
+ゴールデンイメージと spec で完結する。
+
+| リポジトリ | 役割 |
+|---|---|
+| [minivps-router-appliance](https://github.com/0x69d/minivps-router-appliance) | セグメント間ルーティングを行う `router-1`。本 README の `static_routes` の例が経路を向ける先 |
+| [minivps-dns-appliance](https://github.com/0x69d/minivps-dns-appliance) | 内部ドメイン `minivps.internal` の権威DNSと再帰リゾルバを提供する `dns-1`。[DNS レコード自動登録](docs/dns-registration.md)の送信先 |
+
 ## 目的・前提
 
 - ユーザーが宣言した「欲しいサーバー」を、libvirt の domain として実体化する。
@@ -37,8 +47,10 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
   それを優先する。
 - `networks`・`static_routes` は `create()` の可変フィールドではない。
   `startup_script` と同様、変更するには対象 VM の削除・再作成が必要。
-- 静的アドレスと Ansible 側 DHCP レンジ(`.2`〜`.254`、セグメント全域)の衝突回避。
-  dnsmasq の ICMP 到達確認である程度は緩和されるが、起動順序次第で衝突しうる。
+- 静的アドレスと Ansible 側 DHCP レンジの衝突回避。`seg1`〜`seg3` のレンジは
+  `.2`〜`.254` とセグメント全域のため静的アドレスと重複しうる。dnsmasq の ICMP
+  到達確認である程度は緩和されるが、起動順序次第で衝突しうる。`seg4` のように
+  レンジを狭めるのは vars 側の手当てで、プラットフォームの機能ではない。
 
 ## アーキテクチャ
 
@@ -69,10 +81,16 @@ disk: 10                      # GB
 | `disk` | int (GB, 正の整数) | 必須 | — |
 | `hostname` | str（`name` と同じ文字種制約） | 任意 | 未指定なら `name` で補完 |
 | `user` | str（小文字・数字・`-`・`_`、先頭は小文字かアンダースコア、32文字以内） | 任意 | `ubuntu` |
-| `networks` | list[str \| NetworkAttachment]（各要素は文字列か `NetworkAttachment`、1件以上、ネットワーク名の重複不可)。Ansible で事前定義済みのネットワーク名(`default`・`seg1`〜`seg3`)を指定する。未定義名を指定すると作成時に libvirt エラーになる。複数指定すると VM に複数 NIC が付く | 任意 | `["default"]` |
+| `networks` | list[str \| NetworkAttachment]（各要素は文字列か `NetworkAttachment`、1件以上、ネットワーク名の重複不可)。Ansible で事前定義済みのネットワーク名(`default`・`seg1`〜`seg4`)を指定する。未定義名を指定すると作成時に libvirt エラーになる。複数指定すると VM に複数 NIC が付く | 任意 | `["default"]` |
 | `filters` | list[FilterRule] \| null | 任意 | 未指定(null)なら全 inbound 許可。`[]` を明示すると全 inbound 拒否 |
 | `static_routes` | list[StaticRoute] | 任意 | 未指定なら追加ルート無し([スタティックルート](#スタティックルート)参照) |
 | `startup_script` | str \| null | 任意 | 未指定(null)。指定する場合は既知のテンプレート名のみ許可([docs/startup-scripts.md](docs/startup-scripts.md) 参照) |
+
+`disk` は `base_image` の仮想サイズ以上にすること。overlay volume の capacity が
+backing store の仮想サイズを下回っても libvirt は volume 作成を拒否しないため、この
+条件は spec 側で守る必要がある。下回るとゲストから見えるディスクが base image より
+小さくなり、base image のパーティションが収まらない。ゴールデンイメージを使う場合は
+そのイメージの仮想サイズが基準になる。
 
 `FilterRule`: `{port: int(1-65535), protocol: "tcp" \| "udp"}` の inbound 許可ルール1件。
 
@@ -95,18 +113,24 @@ DNSサーバのIPが正当な値のため)。
 VM を互いに隔離するための独立 NAT ネットワーク。Ansible playbook が以下を事前定義する。セグメントのサブネットは
 「192.168.(200+セグメント番号).0/24」の規則。
 
-| name | bridge | サブネット | DHCP レンジ |
-|---|---|---|---|
-| `default` | virbr0 | 192.168.122.0/24 | .2〜.254 |
-| `seg1` | virbr-seg1 | 192.168.201.0/24 | .2〜.254 |
-| `seg2` | virbr-seg2 | 192.168.202.0/24 | .2〜.254 |
-| `seg3` | virbr-seg3 | 192.168.203.0/24 | .2〜.254 |
+| name | bridge | サブネット | DHCP レンジ | 用途 |
+|---|---|---|---|---|
+| `seg1` | virbr-seg1 | 192.168.201.0/24 | .2〜.254 | 汎用 |
+| `seg2` | virbr-seg2 | 192.168.202.0/24 | .2〜.254 | 汎用 |
+| `seg3` | virbr-seg3 | 192.168.203.0/24 | .2〜.254 | 汎用 |
+| `seg4` | virbr-seg4 | 192.168.204.0/24 | .200〜.254 | 静的IPを連番で並べる用途。`.2`〜`.199` を空けてある |
+| `default` | virbr0 | 192.168.122.0/24 | .2〜.254 | `networks` 未指定時の受け皿。libvirt 標準ネットワーク |
+
+`default` だけ最後に置いてあるのは、これがセグメントではないため。上の採番規則にも
+`virbr-segN` の命名にも従わない。
 
 `default` とセグメントの違いは管理元と役割のみ。`default` はディストリ同梱 XML から
 定義される libvirt 標準ネットワークで、spec で `networks` 未指定時の受け皿。
-`seg1`〜`seg3` は本プロジェクトが vars で管理する、分離を明示的に意図した配置先。
+`seg1`〜`seg4` は本プロジェクトが vars で管理する、分離を明示的に意図した配置先。
 遮断の機構は共通で、`default` も各セグメントから見れば相互遮断されたネットワークの
 1つとして振る舞う。
+
+`seg4` だけ DHCP レンジが狭いのは、静的IPとDHCPリースの衝突を構成の側で避けるため。
 
 VM の所属セグメントは spec の `networks` で指定する。
 
@@ -196,9 +220,11 @@ VM 作成/削除時に A/PTR レコードを内部DNSへ自動登録する opt-i
 静的アドレスが無ければ従来通り起動中のみDHCPリースを表示する。いずれの場合も複数NIC
 中の最初の1件のみ。
 
-既知の制約: Ansible が定義するDHCPレンジ(`.2`〜`.254`、セグメント全域)は静的
+既知の制約: `seg1`〜`seg3` のDHCPレンジは `.2`〜`.254` とセグメント全域のため、静的
 アドレスの割当範囲と重複しうる。dnsmasqのICMP到達確認である程度は緩和されるが、
-起動順序次第では衝突する可能性がある。レンジを狭める調整は本プロジェクトのスコープ外。
+起動順序次第では衝突する可能性がある。回避したい場合は `seg4` と同様に
+`ansible/vars/network_segments.yml` で `dhcp_start`/`dhcp_end` を狭め、空けた範囲を
+静的IP専用にする。プラットフォーム側で自動的に調整することはしない。
 
 ## スタートアップスクリプト
 
@@ -263,7 +289,7 @@ ip route show
 ### 1. ホスト側の事前設定(Ansible)
 
 パッケージ導入(apt/dnf)・libvirtd の起動と自動起動・実行ユーザーの `libvirt`
-グループ追加・default ネットワーク・セグメント NAT ネットワーク(`seg1`〜`seg3`)・
+グループ追加・default ネットワーク・セグメント NAT ネットワーク(`seg1`〜`seg4`)・
 `images` ストレージプール・base image・seed ISO 置き場(`/var/lib/libvirt/seeds`)・
 SSH 鍵まで、Ansible playbook で一括セットアップする。
 
@@ -333,6 +359,20 @@ uv run mini-vps delete web-1
 | `delete <name>` | VM を削除する(不在/管理外なら終了コード 3) |
 | `reinstall <name>` | disk を base から作り直して再起動する(不在なら終了コード 3) |
 
+#### 標準出力の形式
+
+コマンドの結果は stdout、ログは stderr へ書き分ける。stdout の形式はサブコマンドごとに
+決まっており、外部ツールから解析する前提で安定させている。
+
+| サブコマンド | stdout |
+|---|---|
+| `list` | VM 名を1行に1件 |
+| `get` / `status` | JSON オブジェクト1件(`json.dumps(indent=2)`) |
+| `create`/`delete`/`start`/`stop`/`restart`/`reinstall` | 人間向けの1行メッセージ |
+
+`status` の JSON は `{"state": ..., "ip": ...}` の2キー。`state` の取りうる値は
+下記の Web API 節に挙げたものと同じ。
+
 `create`/`reinstall` はどちらも `--startup-param KEY=VALUE`(複数回指定可)を
 受け付ける。`startup_script` テンプレートに渡す秘密情報の指定方法は
 [docs/startup-scripts.md](docs/startup-scripts.md) を参照。
@@ -374,6 +414,12 @@ uv run uvicorn mini_vps.api:app
 
 OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
 
+> **警告**: API に認証機構は無い。到達できることがそのまま全操作の権限になるため、
+> 既定の `127.0.0.1:8000` という loopback 限定の待受がそのまま信頼境界になっている。
+> `--host 0.0.0.0` などで待受アドレスを広げると、ゲストネットワークや LAN から
+> 無認証で VM の作成・削除ができる状態になる。広げる場合はファイアウォールや
+> リバースプロキシでの認証を別途用意すること。
+
 | メソッド | パス | 説明 |
 |---|---|---|
 | `GET` | `/servers` | 管理対象の VM 名一覧 |
@@ -385,6 +431,14 @@ OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
 | `POST` | `/servers/{name}/restart` | disk を保持したまま VM を再起動する(不在/管理外 404) |
 | `DELETE` | `/servers/{name}` | 削除(成功 204・不在/管理外 404) |
 | `POST` | `/servers/{name}/reinstall` | disk を base から作り直して再起動(不在/管理外 404) |
+
+`GET /servers/{name}/status` が返す `state` は libvirt の domain state をそのまま
+文字列にしたもので、`nostate`・`running`・`blocked`・`paused`・`shutdown`・`shutoff`・
+`crashed`・`pmsuspended` のいずれか。libvirt が未知の値を返した場合のみ `unknown` に
+落ちる。真実源は `mini_vps/manager.py` の `STATE_NAMES`。稼働中かどうかを判定する
+利用者は `state == "running"` を見ればよく、それ以外の値をまとめて「停止相当」として
+扱ってよい。`ip` は複数 NIC でも最初の1件のみで、静的アドレスを持つ NIC があれば
+起動状態に関わらずそれを優先する。
 
 `PUT`/`POST .../reinstall` の JSON body には、`startup_script` テンプレートに渡す
 秘密情報として `secrets` フィールドを追加で渡せる。詳細は
