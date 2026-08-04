@@ -93,11 +93,20 @@ DOMAIN_XML_TEMPLATE = """
     <rng model='virtio'>
       <backend model='random'>/dev/urandom</backend>
     </rng>
+    <memballoon model='virtio'>
+      <stats period='{balloon_stats_period}'/>
+    </memballoon>
     <serial type='pty'><target port='0'/></serial>
     <console type='pty'><target type='serial' port='0'/></console>
   </devices>
 </domain>
 """
+
+# <memballoon> の統計収集間隔(秒)。libvirt は既定でこの要素を暗黙に追加するが、
+# <stats period> が無いと balloon.available/usable がゲスト内の実使用量として
+# 更新されず、一度取った値のまま古くなる。Prometheus の scrape_interval 15s より
+# 短くして、スクレイプごとに新しい値が乗るようにする。
+BALLOON_STATS_PERIOD_SECONDS = 5
 
 # VM 1台につき spec["networks"] の要素数だけ連結して <devices> に埋め込む。
 # str.format はブロックの繰り返し生成ができないため、DOMAIN_XML_TEMPLATE から

@@ -467,6 +467,14 @@ Web API とは別の独立プロセスとして動く。
 uv run python -m mini_vps.exporter
 ```
 
+メモリは2系統を公開する。`minivps_vm_memory_current_bytes`/`_maximum_bytes` は
+libvirt が見ている balloon の割当量で、`minivps_vm_memory_guest_total_bytes`/
+`_guest_usable_bytes` はゲストの virtio_balloon ドライバが報告する実使用量。後者は
+domain XML の `<memballoon>` に `<stats period>` を持たせて初めて更新されるため、
+この設定を入れる前に作成した VM では出てこない。削除・再作成すると付く。
+ゲスト内の使用量は `guest_total - guest_usable` で、ゲストの `MemTotal - MemAvailable`
+に対応する。
+
 既定では `127.0.0.1:9177/metrics` で待ち受ける(同一ホスト上で動く Prometheus サーバーからの
 スクレイプを想定。単一ホスト上でローカル完結させるという本プロジェクトの前提に合わせている)。
 `MINIVPS_EXPORTER_PORT`・`MINIVPS_EXPORTER_ADDR` 環境変数でポート・待受アドレスを変更できる。

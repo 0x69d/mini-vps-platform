@@ -125,25 +125,27 @@
     {
       "id": 21,
       "type": "timeseries",
-      "title": "メモリ使用量(current / maximum)",
+      "title": "メモリ使用量(ゲスト内)",
+      "description": "使用量は balloon.available - balloon.usable。割当量は domain XML の <memory>。",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_vm_memory_current_bytes{vm=~\"$vm\"}", "legendFormat": "{{vm}}-current", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_vm_memory_maximum_bytes{vm=~\"$vm\"}", "legendFormat": "{{vm}}-maximum", "refId": "B" }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_vm_memory_guest_total_bytes{vm=~\"$vm\"} - minivps_vm_memory_guest_usable_bytes{vm=~\"$vm\"}", "legendFormat": "{{vm}}-使用量", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_vm_memory_maximum_bytes{vm=~\"$vm\"}", "legendFormat": "{{vm}}-割当量", "refId": "B" }
       ],
       "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
     },
     {
       "id": 22,
       "type": "timeseries",
-      "title": "メモリ使用率",
+      "title": "メモリ使用率(ゲスト内)",
+      "description": "1 - balloon.usable / balloon.available。ゲストの MemAvailable 基準。",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_vm_memory_current_bytes{vm=~\"$vm\"} / minivps_vm_memory_maximum_bytes{vm=~\"$vm\"}", "legendFormat": "{{vm}}", "refId": "A" }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "1 - minivps_vm_memory_guest_usable_bytes{vm=~\"$vm\"} / minivps_vm_memory_guest_total_bytes{vm=~\"$vm\"}", "legendFormat": "{{vm}}", "refId": "A" }
       ],
-      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] }
     },
 
     { "id": 30, "type": "row", "title": "ネットワーク", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 }, "panels": [] },

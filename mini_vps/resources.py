@@ -11,6 +11,7 @@ import libvirt
 import yaml
 
 from .config import (
+    BALLOON_STATS_PERIOD_SECONDS,
     BASE_POOL,
     DOMAIN_XML_TEMPLATE,
     INTERFACE_XML_TEMPLATE,
@@ -313,6 +314,7 @@ def build_domain_xml(spec, overlay_path, seed_path, filter_name=None) -> str:
         overlay_path=overlay_path,
         seed_path=seed_path,
         interfaces=interfaces,
+        balloon_stats_period=BALLOON_STATS_PERIOD_SECONDS,
     )
     return xml
 
