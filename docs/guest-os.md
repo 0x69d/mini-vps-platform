@@ -38,7 +38,7 @@
 イメージでは DHCP リース完了前に reached 判定される場合がある。再起動直後に
 `ip route show` で経路が消えていないか、`journalctl -u minivps-static-routes.service` で
 `ExecStart` が実際に成功しているかを併せて確認する
-([README.md の「スタティックルート」](../README.md#スタティックルート)参照)。
+([spec.md の「スタティックルート」](spec.md#スタティックルート)参照)。
 
 | OS | base_image ファイル名 | 自動取得 |
 |---|---|---|
