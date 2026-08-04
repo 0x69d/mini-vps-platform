@@ -1,19 +1,79 @@
 # mini-vps-platform
 
+[![CI](https://github.com/0x69d/mini-vps-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/0x69d/mini-vps-platform/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.14%2B-3776ab)](https://www.python.org/)
+[![libvirt](https://img.shields.io/badge/libvirt-qemu%3A%2F%2F%2Fsystem-orange)](https://libvirt.org/)
+
 QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 
 宣言的な YAML 入力を受け取り、ローカルマシン上に仮想サーバーをプロビジョニングする。
 クラウドでいう「コントロールプレーン」の中核、つまり宣言的入力からリソース確保までの翻訳を自作する。
 
+![Grafana ダッシュボード](docs/images/grafana-overview.png)
+
+VM 3台を稼働させた状態のダッシュボード。エクスポーターが libvirt から集めたメトリクスを
+Prometheus 経由で表示している。構成は
+[Prometheus + Grafana](#6-prometheus--grafanadocker-compose)を参照。
+
+## 設計
+
+- 状態ストアを自前で持たない。spec は libvirt domain の `<metadata>` に埋め込み、
+  読み出し時に同じ Pydantic モデルへ復元する。DB と libvirt を二重に持たないため、
+  両者の不整合という状態が存在しない。
+- CLI は YAML、Web API は JSON を受けるが、どちらも `ServerManager` を包む薄いラッパー。
+  検証は `spec.py` の 1 モデルに集約してあり、入口によって通る制約は変わらない。
+- 書き込み操作は VM 名単位のロックで直列化する。`create()` は既存 domain を読んでから
+  差分を書くため、ロックが無いと同名への同時実行で read-modify-write が壊れる。
+- 監視はリポジトリ内で完結する。エクスポーターと Grafana ダッシュボードの JSON、
+  データソース設定を provisioning として持つため、手動でのダッシュボード作成が要らない。
+- 待受は 3 入口とも localhost 既定。認証機構は持たず、到達できること自体を信頼境界に
+  している。
+
 ## 関連リポジトリ
 
 本リポジトリの機能だけで実現するアプライアンス VM 群。いずれも本体のコードを変更せず、
-ゴールデンイメージと spec で完結する。
+ゴールデンイメージと spec で完結する。k8s だけは複数 VM 間で join token を配る必要があり、
+アプライアンス側に Ansible を持つ。
 
 | リポジトリ | 役割 |
 |---|---|
 | [minivps-router-appliance](https://github.com/0x69d/minivps-router-appliance) | セグメント間ルーティングを行う `router-1`。本 README の `static_routes` の例が経路を向ける先 |
 | [minivps-dns-appliance](https://github.com/0x69d/minivps-dns-appliance) | 内部ドメイン `minivps.internal` の権威DNSと再帰リゾルバを提供する `dns-1`。[DNS レコード自動登録](docs/dns-registration.md)の送信先 |
+| [minivps-k8s-appliance](https://github.com/0x69d/minivps-k8s-appliance) | kubeadm ベースの Kubernetes クラスタを `seg4` 上に構築する。構成は control-plane 1台 + worker N台 |
+
+4リポジトリの関係とネットワーク配置は次のとおり。
+
+```mermaid
+flowchart LR
+    PLAT["mini-vps-platform<br/>CLI / Web API / exporter"]
+
+    DEF(["default<br/>192.168.122.0/24"])
+    S1(["seg1<br/>192.168.201.0/24"])
+    S2(["seg2<br/>192.168.202.0/24"])
+    S3(["seg3<br/>192.168.203.0/24"])
+    S4(["seg4<br/>192.168.204.0/24"])
+
+    R["router-1<br/>IP forwarding + nftables"]
+    D1["dns-1<br/>BIND9 権威DNS<br/>+ 内部リゾルバ"]
+    K["k8s cp-1 / worker-N<br/>kubeadm + containerd + Flannel"]
+
+    PLAT -->|"spec から domain を define / start"| R
+    PLAT --> D1
+    PLAT --> K
+    PLAT -.->|"A/PTR を nsupdate"| D1
+
+    R --- DEF
+    R --- S1
+    R --- S2
+    R --- S3
+    D1 --- DEF
+    D1 --- S3
+    K --- S4
+```
+
+セグメントは互いに遮断された独立 NAT ネットワークで、`router-1` が `seg1`〜`seg3` すべてに
+NIC を持ってセグメント間の経路を提供する。`default` は各 VM の管理用で、ホストからの SSH は
+ここを通る。詳細は[ネットワークセグメント](#ネットワークセグメント)を参照。
 
 ## 目的・前提
 
@@ -41,21 +101,53 @@ QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
 - パケットフィルタの IPv6・egress・稼働中 VM へのライブ反映。ルール変更は停止中の VM に
   限り inbound・IPv4 のみ対応。
 - アラート通知。
-- MAC アドレスのユーザー明示指定。
-- `status`/`get` の IP アドレス表示は、複数 NIC の VM でも最初に見つかった1件のみ。
-  全 NIC の IP 一覧表示は非対応。静的アドレスを持つ NIC があれば起動状態に関わらず
-  それを優先する。
 - `networks`・`static_routes` は `create()` の可変フィールドではない。
   `startup_script` と同様、変更するには対象 VM の削除・再作成が必要。
-- 静的アドレスと Ansible 側 DHCP レンジの衝突回避。`seg1`〜`seg3` のレンジは
-  `.2`〜`.254` とセグメント全域のため静的アドレスと重複しうる。dnsmasq の ICMP
-  到達確認である程度は緩和されるが、起動順序次第で衝突しうる。`seg4` のように
-  レンジを狭めるのは vars 側の手当てで、プラットフォームの機能ではない。
 
 ## アーキテクチャ
 
 ```
 spec.yaml / spec.json  →  parse  →  内部データ構造  →  XML 生成  →  libvirt define / start
+```
+
+上位から下位へ、各層は下位層の薄いラッパーになっている。
+
+```mermaid
+flowchart TB
+    Y["vm-spec.yaml"]
+    J["JSON リクエストボディ"]
+
+    subgraph entry["入口層 — ServerManager の薄いラッパー"]
+        CLI["cli.py<br/>Typer CLI"]
+        API["api.py<br/>FastAPI"]
+        EXP["exporter.py<br/>Prometheus エクスポーター"]
+    end
+
+    SPEC["spec.py — 検証の真実源<br/>ServerSpec / FilterRule / NetworkAttachment"]
+    MGR["manager.py — ServerManager<br/>name を主キーに write を直列化"]
+
+    subgraph lower["下位層"]
+        LC["lifecycle.py<br/>provision / teardown / wait_for_ip"]
+        RES["resources.py<br/>domain XML・nwfilter XML<br/>overlay volume・seed ISO"]
+        DNS["dns_registration.py<br/>nsupdate で A/PTR 登録"]
+    end
+
+    LV["libvirtd — qemu:///system"]
+    DOM["libvirt domain<br/>metadata に spec を格納"]
+
+    Y --> CLI
+    J --> API
+    CLI --> SPEC
+    API --> SPEC
+    SPEC --> MGR
+    EXP -.->|"読み取り専用"| MGR
+    MGR --> LC
+    MGR --> RES
+    MGR -.->|"opt-in・ベストエフォート"| DNS
+    LC --> LV
+    RES --> LV
+    LV --> DOM
+    DOM -.->|"spec を読み戻す"| MGR
 ```
 
 - 入力: YAML / JSON。domain XML は手書きせず、変換層で生成する。
@@ -359,6 +451,46 @@ uv run mini-vps delete web-1
 | `delete <name>` | VM を削除する(不在/管理外なら終了コード 3) |
 | `reinstall <name>` | disk を base から作り直して再起動する(不在なら終了コード 3) |
 
+実行例。`get` が返す spec は libvirt domain の `<metadata>` から読み戻したもので、
+`hostname`・`user` のように spec ファイルで指定しなかった項目も `spec.py` の既定値で
+補完済みの状態になっている。
+
+```console
+$ uv run mini-vps list
+db-1
+web-1
+app-1
+
+$ uv run mini-vps status app-1
+{
+  "state": "running",
+  "ip": "192.168.201.20"
+}
+
+$ uv run mini-vps get web-1
+{
+  "spec": {
+    "base_image": "ubuntu-26.04.img",
+    "disk": 10,
+    "filters": null,
+    "hostname": "web-1",
+    "memory": 1024,
+    "name": "web-1",
+    "networks": [
+      "default"
+    ],
+    "startup_script": null,
+    "static_routes": [],
+    "user": "ubuntu",
+    "vcpus": 2
+  },
+  "status": {
+    "state": "running",
+    "ip": "192.168.122.236"
+  }
+}
+```
+
 #### 標準出力の形式
 
 コマンドの結果は stdout、ログは stderr へ書き分ける。stdout の形式はサブコマンドごとに
@@ -413,6 +545,11 @@ uv run uvicorn mini_vps.api:app
 ```
 
 OpenAPI ドキュメントは <http://127.0.0.1:8000/docs> で確認できる。
+
+![OpenAPI ドキュメント](docs/images/openapi-docs.png)
+
+スキーマ定義は `spec.py` の Pydantic モデルから自動生成される。`FilterRule`・
+`NetworkAttachment`・`StaticRoute` は CLI が YAML から読むのと同じモデル。
 
 > **警告**: API に認証機構は無い。到達できることがそのまま全操作の権限になるため、
 > 既定の `127.0.0.1:8000` という loopback 限定の待受がそのまま信頼境界になっている。
@@ -500,6 +637,15 @@ docker compose up -d
   `GF_SECURITY_ADMIN_USER`/`GF_SECURITY_ADMIN_PASSWORD`)。ログイン後、
   「mini-vps-platform」フォルダの「mini-vps-platform Overview」ダッシュボードで
   VM ごとの CPU・メモリ・ネットワーク・ディスク I/O・起動状態を確認できる。
+
+メモリ・ネットワーク・ディスク I/O のパネルは次のとおり。
+
+![メモリ・ネットワーク・ディスク I/O](docs/images/grafana-resources.png)
+
+ネットワークとディスク I/O は NIC・ブロックデバイス単位に分解して表示する。系列名は
+ホスト側の tap デバイス名とゲストのブロックデバイス名。tap デバイスの番号はホスト全体の
+通し番号なので、複数 NIC の VM では連続した2つが同じ VM のものになる。ブロックデバイスは
+`vda` が overlay volume、`sda` が seed ISO。
 
 Prometheus・Grafana とも `network_mode: host` で動作し、`127.0.0.1` にのみ bind する
 (exporter と同じく単一ホスト内で完結させ、外部には公開しない)。
