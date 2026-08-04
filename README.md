@@ -165,7 +165,7 @@ disk: 10                      # GB
 | `disk` | int (GB, 正の整数)。[`base_image` の仮想サイズ以上にすること](docs/spec.md#disk-と-base-image-の仮想サイズ) | 必須 | — |
 | `hostname` | str（`name` と同じ文字種制約） | 任意 | 未指定なら `name` で補完 |
 | `user` | str（小文字・数字・`-`・`_`、先頭は小文字かアンダースコア、32文字以内） | 任意 | `ubuntu` |
-| `networks` | list[str \| [NetworkAttachment](docs/spec.md#複合型)]（1件以上、ネットワーク名の重複不可） | 任意 | `["default"]` |
+| `networks` | list[[str](docs/spec.md#ネットワークセグメント) \| [NetworkAttachment](docs/spec.md#複合型)]（1件以上、ネットワーク名の重複不可。文字列で書けるのは事前定義済みのネットワーク名のみ） | 任意 | `["default"]` |
 | `filters` | list[[FilterRule](docs/spec.md#複合型)] \| null | 任意 | 未指定(null)なら全 inbound 許可。`[]` を明示すると全 inbound 拒否 |
 | `static_routes` | list[[StaticRoute](docs/spec.md#複合型)] | 任意 | 未指定なら追加ルート無し |
 | `startup_script` | str \| null | 任意 | 未指定(null)。指定する場合は既知のテンプレート名のみ許可 |
@@ -298,6 +298,7 @@ $ uv run mini-vps get web-1
   "spec": {
     "base_image": "ubuntu-26.04.img",
     "disk": 10,
+    "filters": null,
     "hostname": "web-1",
     ...
     "user": "ubuntu",
