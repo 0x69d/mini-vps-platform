@@ -38,6 +38,11 @@ def _parse_domain_stats(raw: dict) -> dict:
     cpu_time_ns = raw.get("cpu.time")
     balloon_current_kib = raw.get("balloon.current")
     balloon_maximum_kib = raw.get("balloon.maximum")
+    # balloon.available/usable はゲストの virtio_balloon ドライバが報告する値で、
+    # domain XML の <memballoon><stats period> が無いと更新されない。
+    # ドライバを持たないゲストでは欠損するため他のフィールドと同様に None を許す。
+    balloon_available_kib = raw.get("balloon.available")
+    balloon_usable_kib = raw.get("balloon.usable")
 
     interfaces = [
         {
@@ -69,6 +74,12 @@ def _parse_domain_stats(raw: dict) -> dict:
         ),
         "memory_maximum_bytes": (
             balloon_maximum_kib * 1024 if balloon_maximum_kib is not None else None
+        ),
+        "memory_guest_total_bytes": (
+            balloon_available_kib * 1024 if balloon_available_kib is not None else None
+        ),
+        "memory_guest_usable_bytes": (
+            balloon_usable_kib * 1024 if balloon_usable_kib is not None else None
         ),
         "vcpus": raw.get("vcpu.current"),
         "interfaces": interfaces,
@@ -133,6 +144,17 @@ class DomainCollector:
         )
         mem_maximum = GaugeMetricFamily(
             "minivps_vm_memory_maximum_bytes", "Maximum memory in bytes", labels=["vm"]
+        )
+        mem_guest_total = GaugeMetricFamily(
+            "minivps_vm_memory_guest_total_bytes",
+            "Total memory seen by the guest in bytes (libvirt balloon.available)",
+            labels=["vm"],
+        )
+        mem_guest_usable = GaugeMetricFamily(
+            "minivps_vm_memory_guest_usable_bytes",
+            "Memory allocatable without swapping in the guest in bytes "
+            "(libvirt balloon.usable)",
+            labels=["vm"],
         )
         cpu_seconds = CounterMetricFamily(
             "minivps_vm_cpu_seconds", "Cumulative CPU time in seconds", labels=["vm"]
@@ -212,6 +234,10 @@ class DomainCollector:
                 mem_current.add_metric([name], parsed["memory_current_bytes"])
             if parsed["memory_maximum_bytes"] is not None:
                 mem_maximum.add_metric([name], parsed["memory_maximum_bytes"])
+            if parsed["memory_guest_total_bytes"] is not None:
+                mem_guest_total.add_metric([name], parsed["memory_guest_total_bytes"])
+            if parsed["memory_guest_usable_bytes"] is not None:
+                mem_guest_usable.add_metric([name], parsed["memory_guest_usable_bytes"])
             if parsed["cpu_time_seconds"] is not None:
                 cpu_seconds.add_metric([name], parsed["cpu_time_seconds"])
             for iface in parsed["interfaces"]:
@@ -234,6 +260,8 @@ class DomainCollector:
         yield vcpus
         yield mem_current
         yield mem_maximum
+        yield mem_guest_total
+        yield mem_guest_usable
         yield cpu_seconds
         yield net_rx_bytes
         yield net_tx_bytes

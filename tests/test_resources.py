@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from mini_vps.config import POOL_NAME, POOL_XML
+from mini_vps.config import BALLOON_STATS_PERIOD_SECONDS, POOL_NAME, POOL_XML
 from mini_vps.resources import (
     _build_network_config,
     _build_static_routes_fragment,
@@ -194,6 +194,12 @@ def test_build_domain_xml_includes_rng_clock_pm_and_discard():
     assert "<suspend-to-mem enabled='no'/>" in xml
     assert "<suspend-to-disk enabled='no'/>" in xml
     assert "discard='unmap'" in xml
+
+
+def test_build_domain_xml_enables_memballoon_stats_period():
+    xml = build_domain_xml(_spec(), "/overlay.qcow2", "/seed.iso")
+    assert "<memballoon model='virtio'>" in xml
+    assert f"<stats period='{BALLOON_STATS_PERIOD_SECONDS}'/>" in xml
 
 
 def test_build_domain_xml_requires_networks_key():

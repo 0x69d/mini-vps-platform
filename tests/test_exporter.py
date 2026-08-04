@@ -10,6 +10,8 @@ RAW_RUNNING = {
     "cpu.time": 12_300_000_000,
     "balloon.current": 524288,
     "balloon.maximum": 1048576,
+    "balloon.available": 1000000,
+    "balloon.usable": 600000,
     "vcpu.current": 2,
     "net.count": 1,
     "net.0.name": "vnet0",
@@ -41,6 +43,8 @@ def test_parse_domain_stats_running_includes_all_fields():
     assert parsed["cpu_time_seconds"] == 12.3
     assert parsed["memory_current_bytes"] == 524288 * 1024
     assert parsed["memory_maximum_bytes"] == 1048576 * 1024
+    assert parsed["memory_guest_total_bytes"] == 1000000 * 1024
+    assert parsed["memory_guest_usable_bytes"] == 600000 * 1024
     assert parsed["vcpus"] == 2
     assert parsed["interfaces"] == [
         {
@@ -77,6 +81,8 @@ def test_parse_domain_stats_shutoff_has_no_resource_fields():
     assert parsed["cpu_time_seconds"] is None
     assert parsed["memory_current_bytes"] is None
     assert parsed["memory_maximum_bytes"] is None
+    assert parsed["memory_guest_total_bytes"] is None
+    assert parsed["memory_guest_usable_bytes"] is None
     assert parsed["vcpus"] is None
     assert parsed["interfaces"] == []
     assert parsed["disks"] == []
@@ -137,6 +143,27 @@ def test_collect_skips_resource_metrics_when_shutoff():
     assert _samples_by_name(families, "minivps_vm_up")[0].value == 0.0
     assert _samples_by_name(families, "minivps_vm_vcpus") == []
     assert _samples_by_name(families, "minivps_vm_cpu_seconds_total") == []
+
+
+def test_collect_omits_guest_memory_when_balloon_driver_is_silent():
+    """virtio_balloon が統計を報告しないゲストでは、ゲスト内メモリの系列を出さない。
+
+    balloon.current/maximum は libvirt 側の値なので残る。
+    """
+    mgr = MagicMock()
+    mgr.is_managed.return_value = True
+    dom = MagicMock()
+    dom.name.return_value = "web-1"
+    raw = dict(RAW_RUNNING)
+    del raw["balloon.available"]
+    del raw["balloon.usable"]
+    mgr.conn.getAllDomainStats.return_value = [(dom, raw)]
+
+    families = list(DomainCollector(lambda: mgr).collect())
+
+    assert _samples_by_name(families, "minivps_vm_memory_guest_total_bytes") == []
+    assert _samples_by_name(families, "minivps_vm_memory_guest_usable_bytes") == []
+    assert _samples_by_name(families, "minivps_vm_memory_current_bytes") != []
 
 
 def test_collect_emits_metrics_per_device():
