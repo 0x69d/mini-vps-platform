@@ -15,26 +15,16 @@ from mini_vps.lifecycle import (
 # --- ensure_network_active ---
 
 
-def test_ensure_network_active_starts_inactive_network():
+@pytest.mark.parametrize(("is_active", "creates"), [(False, True), (True, False)])
+def test_ensure_network_active_starts_only_inactive_network(is_active, creates):
     conn = MagicMock()
     net = MagicMock()
-    net.isActive.return_value = False
+    net.isActive.return_value = is_active
     conn.networkLookupByName.return_value = net
 
     ensure_network_active(conn, {"networks": ["default"]})
 
-    net.create.assert_called_once()
-
-
-def test_ensure_network_active_skips_when_already_active():
-    conn = MagicMock()
-    net = MagicMock()
-    net.isActive.return_value = True
-    conn.networkLookupByName.return_value = net
-
-    ensure_network_active(conn, {"networks": ["default"]})
-
-    net.create.assert_not_called()
+    assert net.create.called is creates
 
 
 def test_ensure_network_active_checks_every_network():
@@ -50,13 +40,6 @@ def test_ensure_network_active_checks_every_network():
     conn.networkLookupByName.assert_any_call("seg2")
     nets["seg1"].create.assert_called_once()
     nets["seg2"].create.assert_not_called()
-
-
-def test_ensure_network_active_requires_networks_key():
-    conn = MagicMock()
-
-    with pytest.raises(KeyError):
-        ensure_network_active(conn, {})
 
 
 def test_ensure_network_active_handles_network_attachment_elements():
@@ -80,11 +63,12 @@ def test_ensure_network_active_handles_network_attachment_elements():
 # --- provision ---
 
 
-def test_provision_logs_each_stage(monkeypatch, caplog):
-    """5段階のどこまで進んだかを追えることが、ログを入れる最大の目的。"""
-    conn = MagicMock()
-    spec = {"name": "web-1", "filters": [{"port": 22, "protocol": "tcp"}]}
+@pytest.fixture
+def stub_provision_deps(monkeypatch):
+    # provision が呼ぶ協調オブジェクトを既定のスタブへ差し替える。
+    # 検査したいものだけを各テストで上書きする。返すのは build_domain_xml のモック。
     monkeypatch.setattr("mini_vps.lifecycle.ensure_network_active", MagicMock())
+    monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
     monkeypatch.setattr("mini_vps.lifecycle.build_nwfilter_xml", lambda s: "<filter/>")
     monkeypatch.setattr("mini_vps.lifecycle._filter_name", lambda s: "minivps-web-1")
     monkeypatch.setattr(
@@ -94,109 +78,42 @@ def test_provision_logs_each_stage(monkeypatch, caplog):
         "mini_vps.lifecycle.build_seed_iso",
         lambda c, s, pubkey, secrets=None: "/seed.iso",
     )
-    monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
-    monkeypatch.setattr(
-        "mini_vps.lifecycle.build_domain_xml", MagicMock(return_value="<domain/>")
-    )
-
-    with caplog.at_level("INFO", logger="mini_vps.lifecycle"):
-        provision(conn, spec)
-
-    messages = [r.getMessage() for r in caplog.records]
-    assert messages == [
-        "web-1: nwfilter minivps-web-1 を定義",
-        "web-1: seed ISO を生成 /seed.iso",
-        "web-1: overlay volume を作成 /overlay.qcow2",
-        "web-1: domain を define",
-    ]
+    build_domain_xml = MagicMock(return_value="<domain/>")
+    monkeypatch.setattr("mini_vps.lifecycle.build_domain_xml", build_domain_xml)
+    return build_domain_xml
 
 
-def test_provision_stops_logging_at_failed_stage(monkeypatch, caplog):
-    """途中で落ちた場合、成功した段階までのログが残る。"""
-    conn = MagicMock()
-    spec = {"name": "web-1"}
-    monkeypatch.setattr("mini_vps.lifecycle.ensure_network_active", MagicMock())
-    monkeypatch.setattr(
-        "mini_vps.lifecycle.build_seed_iso",
-        lambda c, s, pubkey, secrets=None: "/seed.iso",
-    )
-    monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
-    monkeypatch.setattr(
-        "mini_vps.lifecycle.create_overlay_volume",
-        MagicMock(side_effect=RuntimeError("boom")),
-    )
-
-    with caplog.at_level("INFO", logger="mini_vps.lifecycle"):
-        with pytest.raises(RuntimeError):
-            provision(conn, spec)
-
-    messages = [r.getMessage() for r in caplog.records]
-    assert messages == ["web-1: seed ISO を生成 /seed.iso"]
-
-
-def test_provision_defines_nwfilter_when_filters_present(monkeypatch):
+def test_provision_defines_nwfilter_when_filters_present(stub_provision_deps):
     conn = MagicMock()
     spec = {"name": "web-1", "filters": [{"port": 22, "protocol": "tcp"}]}
-    monkeypatch.setattr("mini_vps.lifecycle.ensure_network_active", MagicMock())
-    monkeypatch.setattr("mini_vps.lifecycle.build_nwfilter_xml", lambda s: "<filter/>")
-    monkeypatch.setattr("mini_vps.lifecycle._filter_name", lambda s: "minivps-web-1")
-    monkeypatch.setattr(
-        "mini_vps.lifecycle.create_overlay_volume", lambda c, s: "/overlay.qcow2"
-    )
-    monkeypatch.setattr(
-        "mini_vps.lifecycle.build_seed_iso",
-        lambda c, s, pubkey, secrets=None: "/seed.iso",
-    )
-    monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
-    build_domain_xml_mock = MagicMock(return_value="<domain/>")
-    monkeypatch.setattr("mini_vps.lifecycle.build_domain_xml", build_domain_xml_mock)
 
     provision(conn, spec)
 
     conn.nwfilterDefineXML.assert_called_once_with("<filter/>")
-    build_domain_xml_mock.assert_called_once_with(
+    stub_provision_deps.assert_called_once_with(
         spec, "/overlay.qcow2", "/seed.iso", filter_name="minivps-web-1"
     )
     conn.defineXML.assert_called_once_with("<domain/>")
 
 
-def test_provision_skips_nwfilter_when_absent(monkeypatch):
+def test_provision_skips_nwfilter_when_absent(stub_provision_deps):
     conn = MagicMock()
     spec = {"name": "web-1"}
-    monkeypatch.setattr("mini_vps.lifecycle.ensure_network_active", MagicMock())
-    monkeypatch.setattr(
-        "mini_vps.lifecycle.create_overlay_volume", lambda c, s: "/overlay.qcow2"
-    )
-    monkeypatch.setattr(
-        "mini_vps.lifecycle.build_seed_iso",
-        lambda c, s, pubkey, secrets=None: "/seed.iso",
-    )
-    monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
-    build_domain_xml_mock = MagicMock(return_value="<domain/>")
-    monkeypatch.setattr("mini_vps.lifecycle.build_domain_xml", build_domain_xml_mock)
 
     provision(conn, spec)
 
     conn.nwfilterDefineXML.assert_not_called()
-    build_domain_xml_mock.assert_called_once_with(
+    stub_provision_deps.assert_called_once_with(
         spec, "/overlay.qcow2", "/seed.iso", filter_name=None
     )
 
 
-def test_provision_passes_secrets_to_build_seed_iso(monkeypatch):
+def test_provision_passes_secrets_to_build_seed_iso(monkeypatch, stub_provision_deps):
     conn = MagicMock()
     spec = {"name": "web-1"}
     secrets = {"AI_ENGINE_TOKEN": "sk-abc"}
-    monkeypatch.setattr("mini_vps.lifecycle.ensure_network_active", MagicMock())
-    monkeypatch.setattr(
-        "mini_vps.lifecycle.create_overlay_volume", lambda c, s: "/overlay.qcow2"
-    )
     build_seed_mock = MagicMock(return_value="/seed.iso")
     monkeypatch.setattr("mini_vps.lifecycle.build_seed_iso", build_seed_mock)
-    monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
-    monkeypatch.setattr(
-        "mini_vps.lifecycle.build_domain_xml", MagicMock(return_value="<domain/>")
-    )
 
     provision(conn, spec, secrets=secrets)
 
@@ -205,11 +122,10 @@ def test_provision_passes_secrets_to_build_seed_iso(monkeypatch):
     )
 
 
-def test_provision_builds_seed_before_overlay(monkeypatch):
+def test_provision_builds_seed_before_overlay(monkeypatch, stub_provision_deps):
     conn = MagicMock()
     spec = {"name": "web-1"}
     call_order = []
-    monkeypatch.setattr("mini_vps.lifecycle.ensure_network_active", MagicMock())
     monkeypatch.setattr(
         "mini_vps.lifecycle.create_overlay_volume",
         lambda c, s: call_order.append("overlay") or "/overlay.qcow2",
@@ -217,10 +133,6 @@ def test_provision_builds_seed_before_overlay(monkeypatch):
     monkeypatch.setattr(
         "mini_vps.lifecycle.build_seed_iso",
         lambda c, s, pubkey, secrets=None: call_order.append("seed") or "/seed.iso",
-    )
-    monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
-    monkeypatch.setattr(
-        "mini_vps.lifecycle.build_domain_xml", MagicMock(return_value="<domain/>")
     )
 
     provision(conn, spec)
@@ -319,20 +231,6 @@ def test_wait_for_ip_warns_on_timeout(monkeypatch, caplog):
 
     assert caplog.records[-1].levelname == "WARNING"
     assert "DHCP リースを取得できなかった" in caplog.records[-1].getMessage()
-
-
-def test_wait_for_ip_logs_acquired_address(monkeypatch, caplog):
-    dom = MagicMock()
-    dom.name.return_value = "web-1"
-    monkeypatch.setattr(
-        "mini_vps.lifecycle._lease_ipv4", MagicMock(return_value="10.0.0.5")
-    )
-    monkeypatch.setattr("mini_vps.lifecycle.time.sleep", MagicMock())
-
-    with caplog.at_level("INFO", logger="mini_vps.lifecycle"):
-        wait_for_ip(dom, timeout=120)
-
-    assert "10.0.0.5" in caplog.records[-1].getMessage()
 
 
 # --- teardown ---

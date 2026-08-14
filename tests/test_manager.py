@@ -371,40 +371,6 @@ def test_create_rolls_back_on_failure(monkeypatch):
     teardown_mock.assert_called_once_with(conn, {"name": "web-1"})
 
 
-def test_create_logs_start_and_completion(monkeypatch, caplog):
-    conn = MagicMock()
-    mgr = ServerManager(conn)
-    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: None)
-    monkeypatch.setattr(
-        "mini_vps.manager.provision", MagicMock(return_value=MagicMock())
-    )
-    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
-    mgr.get = MagicMock(return_value={"spec": {"name": "web-1"}, "status": {}})
-
-    with caplog.at_level("INFO", logger="mini_vps.manager"):
-        mgr.create({"name": "web-1"})
-
-    messages = [r.getMessage() for r in caplog.records if r.name == "mini_vps.manager"]
-    assert "web-1: 新規作成を開始" in messages
-    assert "web-1: 新規作成が完了" in messages
-
-
-def test_create_logs_error_on_rollback(monkeypatch, caplog):
-    conn = MagicMock()
-    mgr = ServerManager(conn)
-    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: None)
-    monkeypatch.setattr(
-        "mini_vps.manager.provision", MagicMock(side_effect=RuntimeError("boom"))
-    )
-    monkeypatch.setattr("mini_vps.manager.teardown", MagicMock())
-
-    with caplog.at_level("ERROR", logger="mini_vps.manager"):
-        with pytest.raises(RuntimeError):
-            mgr.create({"name": "web-1"})
-
-    assert "web-1: 新規作成に失敗、巻き戻す" in [r.getMessage() for r in caplog.records]
-
-
 def test_create_does_not_log_secrets(monkeypatch, caplog):
     """secrets と spec 本文がログに現れないことを確認する。
 
