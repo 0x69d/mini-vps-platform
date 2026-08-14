@@ -213,7 +213,7 @@ MAC マッチで列挙する。`runcmd` は初回起動時にしか実行され�
 ### 1. ホスト側の事前設定(Ansible)
 
 パッケージ導入(apt/dnf)・libvirtd の起動と自動起動・実行ユーザーの `libvirt`
-グループ追加・default ネットワーク・セグメント NAT ネットワーク(`seg1`〜`seg4`)・
+グループ追加・default ネットワーク・セグメント NAT ネットワーク(`seg1`〜`seg3`)・
 `images` ストレージプール・base image・seed ISO 置き場(`/var/lib/libvirt/seeds`)・
 SSH 鍵まで、Ansible playbook で一括セットアップする。
 
