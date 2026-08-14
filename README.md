@@ -32,16 +32,16 @@ Prometheus 経由で表示している。構成は
 ## 関連リポジトリ
 
 本リポジトリの機能だけで実現するアプライアンス VM 群。いずれも本体のコードを変更せず、
-ゴールデンイメージと spec で完結する。k8s だけは複数 VM 間で join token を配る必要があり、
-アプライアンス側に Ansible を持つ。
+ゴールデンイメージと spec で完結する。1 VM が 1 つのミドルウェアを担う。
 
 | リポジトリ | 役割 |
 |---|---|
 | [minivps-router-appliance](https://github.com/0x69d/minivps-router-appliance) | セグメント間ルーティングを行う `router-1`。[`static_routes` の例](docs/spec.md#スタティックルート)が経路を向ける先 |
 | [minivps-dns-appliance](https://github.com/0x69d/minivps-dns-appliance) | 内部ドメイン `minivps.internal` の権威DNSと再帰リゾルバを提供する `dns-1`。[DNS レコード自動登録](docs/dns-registration.md)の送信先 |
-| [minivps-k8s-appliance](https://github.com/0x69d/minivps-k8s-appliance) | kubeadm ベースの Kubernetes クラスタを `seg4` 上に構築する。構成は control-plane 1台 + worker N台 |
+| [minivps-web-appliance](https://github.com/0x69d/minivps-web-appliance) | `seg1` に web 層を提供する `web-1`。Apache を載せ、`db-1` への接続元になる |
+| [minivps-db-appliance](https://github.com/0x69d/minivps-db-appliance) | `seg2` に DB 層を提供する `db-1`。MySQL を載せ、`seg1` からの接続だけを受け付ける |
 
-4リポジトリの関係とネットワーク配置は次のとおり。
+5リポジトリの関係とネットワーク配置は次のとおり。
 
 ```mermaid
 flowchart LR
@@ -51,15 +51,16 @@ flowchart LR
     S1(["seg1<br/>192.168.201.0/24"])
     S2(["seg2<br/>192.168.202.0/24"])
     S3(["seg3<br/>192.168.203.0/24"])
-    S4(["seg4<br/>192.168.204.0/24"])
 
     R["router-1<br/>IP forwarding + nftables"]
     D1["dns-1<br/>BIND9 権威DNS<br/>+ 内部リゾルバ"]
-    K["k8s cp-1 / worker-N<br/>kubeadm + containerd + Flannel"]
+    W["web-1<br/>Apache"]
+    D2["db-1<br/>MySQL"]
 
     PLAT -->|"spec から domain を define / start"| R
     PLAT --> D1
-    PLAT --> K
+    PLAT --> W
+    PLAT --> D2
     PLAT -.->|"A/PTR を nsupdate"| D1
 
     R --- DEF
@@ -68,7 +69,10 @@ flowchart LR
     R --- S3
     D1 --- DEF
     D1 --- S3
-    K --- S4
+    W --- DEF
+    W --- S1
+    D2 --- DEF
+    D2 --- S2
 ```
 
 セグメントは互いに遮断された独立 NAT ネットワークで、`router-1` が `seg1`〜`seg3` すべてに
@@ -76,6 +80,9 @@ NIC を持ってセグメント間の経路を提供する。`default` は各 VM
 ここを通る。この遮断に追加のファイアウォール設定は要らない。libvirt が NAT ネットワークの
 起動時に投入するネットワーク単位の FORWARD ルールがそのまま境界になる。詳細は
 [docs/spec.md](docs/spec.md#ネットワークセグメント)を参照。
+
+`web-1` から `db-1` への到達は、この遮断を `router-1` 経由で越える例になっている。
+経路は spec の `static_routes` が、通してよいかは `router-1` の nftables が決める。
 
 ## スコープ
 
