@@ -41,7 +41,7 @@ Prometheus 経由で表示している。構成は
 | [minivps-web-appliance](https://github.com/0x69d/minivps-web-appliance) | `seg1` に web 層を提供する `web-1`。Apache を載せ、`db-1` への接続元になる |
 | [minivps-db-appliance](https://github.com/0x69d/minivps-db-appliance) | `seg2` に DB 層を提供する `db-1`。MySQL を載せ、`seg1` からの接続だけを受け付ける |
 
-5リポジトリの関係とネットワーク配置は次のとおり。
+5リポジトリの関係とネットワーク配置。3セグメント構成で組んだ場合の一例。
 
 ```mermaid
 flowchart LR
@@ -75,10 +75,13 @@ flowchart LR
     D2 --- S2
 ```
 
-セグメントは互いに遮断された独立 NAT ネットワークで、`router-1` が `seg1`〜`seg3` すべてに
-NIC を持ってセグメント間の経路を提供する。`default` は各 VM の管理用で、ホストからの SSH は
-ここを通る。この遮断に追加のファイアウォール設定は要らない。libvirt が NAT ネットワークの
-起動時に投入するネットワーク単位の FORWARD ルールがそのまま境界になる。詳細は
+セグメントは互いに遮断された独立 NAT ネットワークで、`router-1` が全セグメントに NIC を
+持って経路を提供する。`default` は各 VM の管理用で、ホストからの SSH はここを通る。
+遮断に追加のファイアウォール設定は要らない。libvirt が NAT ネットワークの起動時に投入する
+ネットワーク単位の FORWARD ルールがそのまま境界になる。
+
+セグメントを何本どう切るかはプラットフォーム側では決めない。既定では作らず、
+`ansible/vars/network_segments.yml` に書いたぶんだけ作る。詳細は
 [docs/spec.md](docs/spec.md#ネットワークセグメント)を参照。
 
 `web-1` から `db-1` への到達は、この遮断を `router-1` 経由で越える例になっている。
@@ -213,9 +216,9 @@ MAC マッチで列挙する。`runcmd` は初回起動時にしか実行され�
 ### 1. ホスト側の事前設定(Ansible)
 
 パッケージ導入(apt/dnf)・libvirtd の起動と自動起動・実行ユーザーの `libvirt`
-グループ追加・default ネットワーク・セグメント NAT ネットワーク(`seg1`〜`seg3`)・
-`images` ストレージプール・base image・seed ISO 置き場(`/var/lib/libvirt/seeds`)・
-SSH 鍵まで、Ansible playbook で一括セットアップする。
+グループ追加・default ネットワーク・セグメント NAT ネットワーク(既定では作らない。
+`ansible/vars/network_segments.yml` で定義する)・`images` ストレージプール・base image・
+seed ISO 置き場(`/var/lib/libvirt/seeds`)・SSH 鍵まで、Ansible playbook で一括セットアップする。
 
 ```bash
 uv sync --only-group ops
