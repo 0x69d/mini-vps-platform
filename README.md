@@ -41,12 +41,10 @@ Prometheus 経由で表示している。構成は
 | [minivps-web-appliance](https://github.com/0x69d/minivps-web-appliance) | `seg1` に web 層を提供する `web-1`。Apache を載せ、`db-1` への接続元になる |
 | [minivps-db-appliance](https://github.com/0x69d/minivps-db-appliance) | `seg2` に DB 層を提供する `db-1`。MySQL を載せ、`seg1` からの接続だけを受け付ける |
 
-5リポジトリの関係とネットワーク配置。3セグメント構成で組んだ場合の一例。
+4アプライアンスVMのネットワーク配置。3セグメント構成で組んだ場合の一例。
 
 ```mermaid
-flowchart LR
-    PLAT["mini-vps-platform<br/>CLI / Web API / exporter"]
-
+flowchart TB
     DEF(["default<br/>192.168.122.0/24"])
     S1(["seg1<br/>192.168.201.0/24"])
     S2(["seg2<br/>192.168.202.0/24"])
@@ -57,22 +55,25 @@ flowchart LR
     W["web-1<br/>Apache"]
     D2["db-1<br/>MySQL"]
 
-    PLAT -->|"spec から domain を define / start"| R
-    PLAT --> D1
-    PLAT --> W
-    PLAT --> D2
-    PLAT -.->|"A/PTR を nsupdate"| D1
+    %% default → seg1 → seg2 → seg3 の並び順とVM行の位置揃えのための不可視エッジ
+    DEF ~~~ S1
+    S1 ~~~ S2
+    S2 ~~~ S3
+    S3 ~~~ R
+    S3 ~~~ D1
+    S3 ~~~ W
+    S3 ~~~ D2
 
-    R --- DEF
-    R --- S1
-    R --- S2
-    R --- S3
-    D1 --- DEF
-    D1 --- S3
-    W --- DEF
-    W --- S1
-    D2 --- DEF
-    D2 --- S2
+    DEF --- R
+    S1 --- R
+    S2 --- R
+    S3 --- R
+    DEF --- D1
+    S3 --- D1
+    DEF --- W
+    S1 --- W
+    DEF --- D2
+    S2 --- D2
 ```
 
 セグメントは互いに遮断された独立 NAT ネットワークで、`router-1` が全セグメントに NIC を
