@@ -76,6 +76,24 @@ class StackError(MiniVpsError):
         self.pending = list(pending or [])
 
 
+class GuestAgentUnavailable(MiniVpsError):
+    """ゲスト内の qemu-guest-agent を使えないことを表す。
+
+    VM は稼働しているが、exec などの guest agent 経由の操作ができない状態。
+    原因(domain XML に channel が無い古い VM・agent が未導入/未起動・ゲストの
+    設定でコマンドが無効化されている)はメッセージで区別する。VM が停止中・
+    一時停止中の場合はこの例外ではなく ServerNotRunning を使う。
+    """
+
+
+class GuestExecError(MiniVpsError):
+    """ゲストでコマンドを開始できない、または exec の要求自体が不正なことを表す。
+
+    例: argv が空、stdin が上限を超える、実行ファイルがゲストに無い。
+    入力の誤りなので、終了コードは入力エラーと同じ 1、HTTP は 422 に対応づける。
+    """
+
+
 @dataclasses.dataclass(frozen=True)
 class ErrorMapping:
     """例外1種類分の正規化先。
@@ -100,6 +118,9 @@ ERROR_TABLE: dict[type[Exception], ErrorMapping] = {
     # 7 は libvirtError(ホスト側の障害 / 503)。libvirt は入口層でだけ扱う。
     PlatformUnsupported: ErrorMapping(422, 8, "platform unsupported"),
     StackError: ErrorMapping(422, 12, "stack error"),
+    GuestAgentUnavailable: ErrorMapping(409, 9, "guest agent unavailable"),
+    # 入力の誤り(argv・stdin・ゲストに無いコマンド)。1 は入力エラーの共通コード。
+    GuestExecError: ErrorMapping(422, 1, "guest exec failed"),
 }
 
 

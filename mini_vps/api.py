@@ -96,6 +96,18 @@ class StackApplyRequest(StackPlanRequest):
     secrets: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
+class ExecRequest(BaseModel):
+    """POST /servers/{name}/exec の body。
+
+    argv はシェルを介さずにそのまま実行される(パイプ等が要るなら
+    ["sh", "-c", "..."])。stdin は UTF-8 で符号化してゲストの標準入力へ渡す。
+    """
+
+    argv: list[str] = Field(min_length=1)
+    stdin: str | None = None
+    timeout: float = Field(default=60, gt=0, le=3600)
+
+
 def get_manager(request: Request) -> ServerManager:
     """共有 ServerManager を返す依存。"""
     return request.app.state.manager
@@ -245,6 +257,42 @@ def restart_server(
     電源断→起動による強制再起動を行う。
     """
     return mgr.restart(name, force=body.force if body else False)
+
+
+@app.post("/servers/{name}/exec")
+def exec_in_server(
+    name: str, body: ExecRequest, mgr: ServerManager = Depends(get_manager)
+) -> dict:
+    """稼働中の VM 内で guest agent 経由でコマンドを実行する(ServerManager.exec)。
+
+    終了まで待って exit_code・stdout・stderr などを返す。timeout を超えた場合も
+    200 で timed_out=true を返す(プロセスはゲストで走り続ける)。停止中・一時停止中
+    は 409(ServerNotRunning)、guest agent を使えなければ 409
+    (GuestAgentUnavailable)、ゲストでコマンドを開始できなければ 422。
+    """
+    return mgr.exec(name, body.argv, stdin=body.stdin, timeout=body.timeout)
+
+
+@app.post("/servers/{name}/pause")
+def pause_server(name: str, mgr: ServerManager = Depends(get_manager)) -> dict:
+    """稼働中の VM を一時停止する(一時停止中なら冪等に no-op、停止中なら 409)。"""
+    return mgr.pause(name)
+
+
+@app.post("/servers/{name}/resume")
+def resume_server(name: str, mgr: ServerManager = Depends(get_manager)) -> dict:
+    """一時停止中の VM を再開する(稼働中なら冪等に no-op、停止中なら 409)。"""
+    return mgr.resume(name)
+
+
+@app.get("/servers/{name}/ssh")
+def get_ssh_endpoint(name: str, mgr: ServerManager = Depends(get_manager)) -> dict:
+    """VM への SSH の接続先(host・port・user・identity_file)を返す。
+
+    identity_file は API サーバを動かすユーザーのホームにある秘密鍵のパスで、
+    鍵の中身は返さない。
+    """
+    return mgr.ssh_endpoint(name)
 
 
 @app.delete("/servers/{name}", status_code=204)
