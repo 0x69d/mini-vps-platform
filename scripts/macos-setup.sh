@@ -122,7 +122,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 	fi
 	sleep 1
 done
-$connected || die "$URI に接続できません。'brew services info libvirt' と ~/.cache/libvirt/libvirtd.log を確認してください"
+$connected || die "$URI に接続できません。'brew services info libvirt' でサービスの状態を確認し、'brew services restart libvirt' を試してください"
 virsh_s version
 
 # --- 4. データディレクトリと images プール -------------------------------------
