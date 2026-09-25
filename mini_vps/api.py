@@ -221,10 +221,12 @@ def put_server(
 ) -> dict:
     """VM を宣言的に作成/収束する。
 
-    新規作成なら 201。既存 spec と完全一致する no-op、または memory/vcpus/filters
-    のみの差分を収束させた場合は 200(収束は対象 VM がドメイン停止中の場合のみ、
-    稼働中なら 409/ServerRunning)。それ以外のフィールドの差分、または管理外の
-    同名 domain は 409(ServerConflict)。body は name を除く spec と secrets。
+    新規作成なら 201。既存 spec と完全一致する no-op、または差分を収束させた場合は
+    200。フィールドごとの反映方式は planning.FIELD_APPLY_MODES が決める
+    (autostart・filters・egress・stack・depends_on は稼働中でも反映、memory・vcpus は
+    停止中のみで稼働中なら 409/ServerRunning)。再作成が必要なフィールドの差分、
+    または管理外の同名 domain は 409(ServerConflict)。body は name を除く spec と
+    secrets。
     """
     # 201/200 の判定は create が name ロック内で原子的に行う(created を返す)。
     # ハンドラ側で事前 get すると並行 2 本が共に created=True になり破綻するため避ける。

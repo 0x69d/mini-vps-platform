@@ -45,7 +45,7 @@ def test_detect_macos_apple_silicon():
     assert profile.network_mode == NETWORK_USER
     assert profile.supports_nwfilter is False
     assert (profile.disk_cache, profile.disk_io) == (None, None)
-    assert profile.pool_path.endswith("Library/Application Support/mini-vps/vps-pool")
+    assert profile.pool_path == "/Users/u/Library/Application Support/mini-vps/vps-pool"
 
 
 def test_detect_macos_intel_uses_q35():

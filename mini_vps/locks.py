@@ -52,11 +52,18 @@ class NameLocks:
             return None
         try:
             os.makedirs(self.lock_dir, exist_ok=True)
-            return os.open(
+            fd = os.open(
                 os.path.join(self.lock_dir, f"{name}.lock"),
-                os.O_RDWR | os.O_CREAT,
+                os.O_RDONLY | os.O_CREAT,
                 0o660,
             )
+            # umask(既定 022)で 0640 に削られると、同じグループの別ユーザー
+            # (API サービスと CLI を使う人間など)が開けずプロセス間ロックが効かない。
+            # 作成者だけが chmod できるため、失敗しても続ける。flock は読み取り専用の
+            # fd でも効く(Linux・macOS とも)。
+            with contextlib.suppress(PermissionError):
+                os.fchmod(fd, 0o660)
+            return fd
         except OSError as e:
             if not self._warned:
                 _LOGGER.warning(

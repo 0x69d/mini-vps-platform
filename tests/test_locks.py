@@ -1,4 +1,6 @@
 import multiprocessing
+import os
+import stat
 import threading
 import time
 
@@ -56,3 +58,13 @@ def test_hold_falls_back_to_in_process_lock_when_dir_unusable(tmp_path, caplog):
 def test_hold_without_lock_dir_uses_only_thread_lock():
     with NameLocks(None).hold("web-1"):
         pass
+
+
+def test_lock_file_is_group_writable_despite_umask(tmp_path):
+    old = os.umask(0o022)
+    try:
+        with NameLocks(str(tmp_path)).hold("web-1"):
+            pass
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE((tmp_path / "web-1.lock").stat().st_mode) == 0o660

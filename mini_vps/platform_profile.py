@@ -113,7 +113,8 @@ def detect(
     env = dict(os.environ if env is None else env)
 
     if system == "darwin":
-        data_dir = str(Path(env.get("MINIVPS_DATA_DIR", _DARWIN_DATA_DIR)).expanduser())
+        home = env.get("HOME") or str(Path.home())
+        data_dir = env.get("MINIVPS_DATA_DIR", _DARWIN_DATA_DIR).replace("~", home, 1)
         accel = env.get("MINIVPS_ACCEL", "hvf")
         defaults = {
             "libvirt_uri": "qemu:///session",

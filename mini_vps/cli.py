@@ -176,9 +176,10 @@ def _cmd_create(
 ) -> dict:
     """VM スペックの YAML ファイルから VM を宣言的に作成/収束する。
 
-    既存 VM に対して再実行した場合、memory/vcpus/filters の差分のみドメイン停止中に
-    限り収束させる(起動中なら ServerRunning)。それ以外のフィールドの差分は
-    ServerConflict で拒否する(ServerManager.create 参照)。
+    既存 VM に対して再実行した場合、差分をフィールドごとの反映方式
+    (planning.FIELD_APPLY_MODES)に従って収束させる。memory・vcpus は停止中のみ
+    (稼働中なら ServerRunning)、再作成が必要なフィールドの差分は ServerConflict で
+    拒否する(ServerManager.create 参照)。
     """
     with open(spec_file, encoding="utf-8") as f:
         spec = load_spec(f.read())
@@ -583,6 +584,7 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
         - 7: libvirtError(libvirtd 停止・接続不可など)
         - 8: PlatformUnsupported
         - 9: GuestAgentUnavailable
+        - 10: SnapshotNotFound
         - 11: InsufficientCapacity(容量チェックで作成・拡張を拒否)
         - 12: StackError(スタックの検証・計画・適用の失敗)
 
