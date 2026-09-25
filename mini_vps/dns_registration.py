@@ -4,8 +4,7 @@
 MINIVPS_DNS_TSIG_KEY_FILE)がすべて設定されているときのみ有効になり、
 1つでも欠ければ機能全体が完全に無効になる。
 DNS 操作はBIND 付属の nsupdate CLI を subprocess で呼ぶ薄い層とし、
-dnspython 等の追加依存は入れない。cloud-localds を subprocess で呼ぶ
-resources.build_seed_iso() と同型。
+dnspython 等の追加依存は入れない。
 
 公開関数(register / unregister)は例外を一切送出しないベストエフォート。
 DNS の失敗で VM の create/delete を失敗させると、dns-1 自身の

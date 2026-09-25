@@ -138,9 +138,9 @@ networks:
 仕組み: `create()` は VM名とNICインデックスから決定的にMACアドレスを生成し
 (`52:54:00` プレフィックス)、domain XML の各 `<interface>` に埋め込む。静的IPを持つ
 NICが1つでもあれば、cloud-init の `network-config`を生成し
-`cloud-localds -N` で seed ISO に組み込む。`network-config` を渡すとそれが唯一の
+seed ISO に組み込む。`network-config` を渡すとそれが唯一の
 設定源になるため、DHCPの文字列要素も含めて全NICをMACマッチで列挙する。静的IPを1つも持たないVMでは
-`network-config` 自体を生成せず、cloud-localds の呼び出しも変わらない。
+`network-config` 自体を生成せず、seed ISO には user-data と meta-data だけが入る。
 
 `gateway` を指定すると、そのNICに `routes: [{to: default, via: gateway}]` として
 デフォルトルートを追加する。省略するとそのNICにはルートを追加しない。`gateway` は

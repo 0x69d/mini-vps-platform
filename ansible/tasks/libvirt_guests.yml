@@ -1,0 +1,36 @@
+# ホストの停止・再起動時に、稼働中のゲストを強制終了ではなく正常終了させる(D2)。
+#
+# libvirt-guests はホスト停止時(サービスの stop)に URIS のゲストへ ACPI shutdown を
+# 送り、SHUTDOWN_TIMEOUT 秒まで待つ。起動時の復帰は domain の autostart(spec の
+# autostart)に一本化するため、ON_BOOT は ignore にする。start にすると、停止前に
+# 動いていた VM が autostart の設定に関係なく起動し、spec と食い違う。
+- name: libvirt-guests の設定を書き込む
+  become: true
+  ansible.builtin.lineinfile:
+    path: "{{ minivps_libvirt_guests_conf[ansible_facts['os_family']] }}"
+    regexp: "^#?\\s*{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { key: ON_BOOT, value: ignore }
+    - { key: ON_SHUTDOWN, value: shutdown }
+    - { key: SHUTDOWN_TIMEOUT, value: "120" }
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+  vars:
+    minivps_libvirt_guests_conf:
+      Debian: /etc/default/libvirt-guests
+      RedHat: /etc/sysconfig/libvirt-guests
+
+# RemainAfterExit の oneshot ユニットで、ホスト停止時の stop でゲストを終了させる。
+# active になっていないと stop が走らないため、有効化に加えて起動もしておく
+# (ON_BOOT=ignore なので起動してもゲストには何もしない)。
+- name: libvirt-guests を起動・自動起動を有効にする
+  become: true
+  ansible.builtin.systemd_service:
+    name: libvirt-guests.service
+    state: started
+    enabled: true

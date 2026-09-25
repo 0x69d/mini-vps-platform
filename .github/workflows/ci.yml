@@ -34,6 +34,51 @@ jobs:
       - name: Pytest
         run: uv run pytest
 
+  lint-and-test-macos:
+    # macOS を標準でサポートするため、Apple Silicon のランナーでも同じ lint と
+    # テストを回す。テストは conftest の autouse fixture で Linux/KVM プロファイルに
+    # 固定されるので、ホストに依らず同じ結果になるはず。ここで確かめているのは
+    # Homebrew の libvirt に対して libvirt-python がビルドできることと、
+    # テストが Linux 固有のパスや挙動に依存していないこと。
+    runs-on: macos-latest
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libvirt build headers
+        # libvirt-python は sdist ビルドに libvirt 開発ヘッダを要する。
+        # pkg-config は Homebrew では pkgconf の別名。
+        run: brew install libvirt pkg-config
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python 3.14
+        run: uv python install 3.14
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Ruff check
+        run: uv run ruff check
+
+      - name: Ruff format check
+        run: uv run ruff format --check
+
+      - name: Pytest
+        run: uv run pytest
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shellcheck
+        # ubuntu-latest のランナーには shellcheck が同梱されている。
+        run: shellcheck scripts/*.sh
+
   compose-validate:
     runs-on: ubuntu-latest
     steps:

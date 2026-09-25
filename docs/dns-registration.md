@@ -67,8 +67,7 @@ DNS 登録の失敗で create/delete を失敗させると、dns-1 自身が壊�
 
 ### nsupdate subprocess を選んだ理由
 
-dnspython 等のライブラリ依存を増やさず、`cloud-localds` を subprocess で呼ぶ
-`resources.build_seed_iso()` と同じ構図に揃えた。TSIG 署名や RFC 2136 の
+dnspython 等のライブラリ依存を増やさず、専用の外部ツールに委譲する。TSIG 署名や RFC 2136 の
 プロトコル実装は BIND 純正ツールに委譲され、自前実装を持たない。
 `ServerManager` からは `register` / `unregister` の2関数だけを呼び、依存方向は
 manager → dns_registration の一方向に保つ。
