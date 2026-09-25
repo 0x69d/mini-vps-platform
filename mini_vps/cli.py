@@ -19,6 +19,7 @@ import yaml
 from pydantic import ValidationError
 
 from . import errors
+from .doctor import has_error
 from .guest_agent import STDIN_LIMIT_BYTES
 from .logging_config import configure as configure_logging
 from .manager import ServerManager, register_quiet_error_handler
@@ -282,6 +283,94 @@ def _cmd_list(ctx: typer.Context) -> list[str]:
     return ctx.obj.list()
 
 
+def _human_bytes(n: int) -> str:
+    """バイト数を 1024 進の短い表記(例: 3.5GiB)にする。"""
+    value = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024:
+            return f"{value:.0f}{unit}" if unit == "B" else f"{value:.1f}{unit}"
+        value /= 1024
+    return f"{value:.1f}TiB"
+
+
+def _format_images(images: list[dict]) -> list[str]:
+    """Image list の結果を列を揃えた表の行にする(image が無ければ空リスト)。"""
+    if not images:
+        return []
+    rows = [("NAME", "VIRTUAL", "ACTUAL", "FORMAT", "USED_BY")] + [
+        (
+            i["name"],
+            _human_bytes(i["virtual_bytes"]),
+            _human_bytes(i["actual_bytes"]),
+            i["format"] or "-",
+            ",".join(i["used_by"]) or "-",
+        )
+        for i in images
+    ]
+    widths = [max(len(row[col]) for row in rows) for col in range(4)]
+    return [
+        "  ".join(cell.ljust(w) for cell, w in zip(row[:4], widths)) + "  " + row[4]
+        for row in rows
+    ]
+
+
+def _format_gc(result: dict) -> list[str]:
+    """Gc の結果を1リソース1行の文字列にする。"""
+    if not result["orphans"]:
+        return ["no orphans"]
+    if not result["applied"]:
+        return [
+            f"would remove: {o['pool'] or 'nwfilter'}/{o['name']}"
+            for o in result["orphans"]
+        ]
+    lines = [
+        f"removed: {r['pool'] or 'nwfilter'}/{r['name']}" for r in result["removed"]
+    ]
+    lines += [
+        f"skipped: {r['pool'] or 'nwfilter'}/{r['name']} ({r['reason']})"
+        for r in result["skipped"]
+    ]
+    return lines
+
+
+image_app = typer.Typer(help="base image を扱う", no_args_is_help=True)
+app.add_typer(image_app, name="image")
+
+
+@image_app.command("list", help="base image と参照している VM を一覧する")
+@_run_command
+def _cmd_image_list(ctx: typer.Context) -> list[str]:
+    """Base image の名前・仮想サイズ・実サイズ・フォーマット・参照 VM を表で返す。"""
+    return _format_images(ctx.obj.images())
+
+
+@_command(
+    "doctor",
+    help="ホストの前提と孤児リソースを検査する(error があれば終了コード 1)",
+)
+def _cmd_doctor(ctx: typer.Context) -> None:
+    """検査結果を1行ずつ出し、error が1件でもあれば終了コード 1 で終える。
+
+    結果の出力と終了コードを両立させるため、_run_command の出力に任せず自分で
+    stdout に書いてから typer.Exit を送出する。
+    """
+    results = ctx.obj.doctor()
+    for r in results:
+        print(f"{r['level']:<5}  {r['check']}: {r['detail']}")
+    raise typer.Exit(code=1 if has_error(results) else 0)
+
+
+@_command("gc", help="孤児リソース(volume・seed・nwfilter)を回収する(既定は dry-run)")
+def _cmd_gc(
+    ctx: typer.Context,
+    apply: Annotated[
+        bool, typer.Option("--apply", help="dry-run をやめて実際に削除する")
+    ] = False,
+) -> list[str]:
+    """孤児リソースを一覧する。--apply のときは name 単位ロックを取って削除する。"""
+    return _format_gc(ctx.obj.gc(apply=apply))
+
+
 @_command("status", help="VM の状態(state, ip)を取得する")
 def _cmd_status(ctx: typer.Context, name: str) -> dict:
     """指定 VM の状態(state, ip)を返す。"""
@@ -494,9 +583,11 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
         - 7: libvirtError(libvirtd 停止・接続不可など)
         - 8: PlatformUnsupported
         - 9: GuestAgentUnavailable
+        - 11: InsufficientCapacity(容量チェックで作成・拡張を拒否)
         - 12: StackError(スタックの検証・計画・適用の失敗)
 
         `exec --raw` はこれらに加えて、ゲスト側のコマンドの終了コードで終了する。
+        `doctor` は検査で error が1件でもあれば 1 を返す。
     """
     factory = manager_factory or _open_manager
     try:

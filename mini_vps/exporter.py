@@ -14,6 +14,7 @@ import libvirt
 from prometheus_client import REGISTRY, start_http_server
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
+from .config import BASE_POOL, POOL_NAME, SEED_POOL_NAME
 from .logging_config import configure as configure_logging
 from .manager import STATE_NAMES, ServerManager, register_quiet_error_handler
 from .platform_profile import get_profile
@@ -87,6 +88,60 @@ def _parse_domain_stats(raw: dict) -> dict:
     }
 
 
+# ホスト容量として公開するストレージプール(overlay・seed・base image)。
+HOST_POOLS = (POOL_NAME, SEED_POOL_NAME, BASE_POOL)
+
+_MIB = 1024 * 1024
+
+
+def _parse_host_stats(
+    node_info: list, specs: dict[str, dict], pool_infos: dict[str, list]
+) -> dict:
+    """ホスト全体の容量と割当を正規化する(純粋関数)。
+
+    割当は管理対象 VM の spec(metadata)の memory/vcpus を稼働状態に関わらず
+    合計する。admission.py の容量チェックと同じ数え方で、autostart で全台が同時に
+    起きたときに必要になる量を表す。
+
+    Args:
+        node_info: `conn.getInfo()` の戻り値 [model, memory(MiB), cpus, ...]。
+        specs: 管理対象 VM の name → spec(ServerManager.managed_specs())。
+        pool_infos: プール名 → `pool.info()` の戻り値
+            [state, capacity, allocation, available](バイト)。無いプールは含めない。
+
+    Returns:
+        memory_bytes / cpus / allocated_memory_bytes / allocated_vcpus / pools
+        (プール名 → capacity_bytes・allocation_bytes・available_bytes)を持つ dict。
+    """
+    return {
+        "memory_bytes": node_info[1] * _MIB,
+        "cpus": node_info[2],
+        "allocated_memory_bytes": sum(s.get("memory", 0) for s in specs.values())
+        * _MIB,
+        "allocated_vcpus": sum(s.get("vcpus", 0) for s in specs.values()),
+        "pools": {
+            name: {
+                "capacity_bytes": info[1],
+                "allocation_bytes": info[2],
+                "available_bytes": info[3],
+            }
+            for name, info in pool_infos.items()
+        },
+    }
+
+
+def _collect_host_stats(mgr: ServerManager) -> dict:
+    """ホスト全体の統計を libvirt から集めて _parse_host_stats に渡す。"""
+    conn = mgr.conn
+    existing = {p.name() for p in conn.listAllStoragePools()}
+    pool_infos = {
+        name: conn.storagePoolLookupByName(name).info()
+        for name in HOST_POOLS
+        if name in existing
+    }
+    return _parse_host_stats(conn.getInfo(), mgr.managed_specs(), pool_infos)
+
+
 def _default_manager_factory() -> ServerManager:
     """既定の接続先(HostProfile.libvirt_uri)に接続した ServerManager を生成する。"""
     return ServerManager(libvirt.open(get_profile().libvirt_uri))
@@ -118,6 +173,9 @@ class DomainCollector:
         「どの domain が管理対象か」の判定は ServerManager.is_managed() に一元化し、
         getAllDomainStats() の結果を domain ごとに直接フィルタする(list() による
         事前の全件列挙を挟まないことで、二重列挙とその間の TOCTOU を避ける)。
+
+        あわせてホスト全体の容量(メモリ・論理 CPU・プール)と管理対象 VM の割当の
+        合計を出す(_parse_host_stats 参照)。
 
         libvirt との通信に失敗した場合は例外を伝播させず、
         `minivps_exporter_scrape_success` を 0 にして VM メトリクスを出さない
@@ -200,10 +258,41 @@ class DomainCollector:
             labels=["vm", "device"],
         )
 
+        host_memory = GaugeMetricFamily(
+            "minivps_host_memory_bytes", "Physical memory of the host in bytes"
+        )
+        host_cpus = GaugeMetricFamily(
+            "minivps_host_cpus", "Number of logical CPUs of the host"
+        )
+        allocated_memory = GaugeMetricFamily(
+            "minivps_allocated_memory_bytes",
+            "Sum of memory declared by managed VMs (running or not) in bytes",
+        )
+        allocated_vcpus = GaugeMetricFamily(
+            "minivps_allocated_vcpus",
+            "Sum of vCPUs declared by managed VMs (running or not)",
+        )
+        pool_capacity = GaugeMetricFamily(
+            "minivps_pool_capacity_bytes",
+            "Capacity of the storage pool in bytes",
+            labels=["pool"],
+        )
+        pool_allocation = GaugeMetricFamily(
+            "minivps_pool_allocation_bytes",
+            "Allocation of the storage pool in bytes",
+            labels=["pool"],
+        )
+        pool_available = GaugeMetricFamily(
+            "minivps_pool_available_bytes",
+            "Free space of the storage pool in bytes",
+            labels=["pool"],
+        )
+
         try:
             if self._mgr is None:
                 self._mgr = self._manager_factory()
             all_stats = self._mgr.conn.getAllDomainStats()
+            host = _collect_host_stats(self._mgr)
         except libvirt.libvirtError as e:
             _LOGGER.warning("統計の取得に失敗、接続を張り直す: %s", e)
             self._drop_manager()
@@ -253,8 +342,24 @@ class DomainCollector:
                 disk_rd_requests.add_metric(labels, disk["rd_reqs"])
                 disk_wr_requests.add_metric(labels, disk["wr_reqs"])
 
+        host_memory.add_metric([], host["memory_bytes"])
+        host_cpus.add_metric([], host["cpus"])
+        allocated_memory.add_metric([], host["allocated_memory_bytes"])
+        allocated_vcpus.add_metric([], host["allocated_vcpus"])
+        for pool_name, pool in host["pools"].items():
+            pool_capacity.add_metric([pool_name], pool["capacity_bytes"])
+            pool_allocation.add_metric([pool_name], pool["allocation_bytes"])
+            pool_available.add_metric([pool_name], pool["available_bytes"])
+
         scrape_success.add_metric([], 1.0)
         yield scrape_success
+        yield host_memory
+        yield host_cpus
+        yield allocated_memory
+        yield allocated_vcpus
+        yield pool_capacity
+        yield pool_allocation
+        yield pool_available
         yield up
         yield state
         yield vcpus

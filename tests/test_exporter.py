@@ -2,7 +2,12 @@ from unittest.mock import MagicMock
 
 import libvirt
 
-from mini_vps.exporter import DomainCollector, _parse_domain_stats, main
+from mini_vps.exporter import (
+    DomainCollector,
+    _parse_domain_stats,
+    _parse_host_stats,
+    main,
+)
 
 RAW_RUNNING = {
     "state.state": libvirt.VIR_DOMAIN_RUNNING,
@@ -299,3 +304,94 @@ def test_main_configures_logging(monkeypatch):
     main()
 
     assert captured == [True]
+
+
+# --- ホスト全体のメトリクス ---
+
+
+def test_parse_host_stats_sums_allocations_and_pools():
+    specs = {
+        "web-1": {"memory": 1024, "vcpus": 2},
+        "db-1": {"memory": 4096, "vcpus": 4},
+    }
+    pools = {"vps-pool": [2, 1000, 400, 600], "images": [2, 1000, 300, 700]}
+
+    host = _parse_host_stats(["x86_64", 8192, 4, 2100, 1, 1, 4, 1], specs, pools)
+
+    assert host == {
+        "memory_bytes": 8192 * 1024 * 1024,
+        "cpus": 4,
+        "allocated_memory_bytes": 5120 * 1024 * 1024,
+        "allocated_vcpus": 6,
+        "pools": {
+            "vps-pool": {
+                "capacity_bytes": 1000,
+                "allocation_bytes": 400,
+                "available_bytes": 600,
+            },
+            "images": {
+                "capacity_bytes": 1000,
+                "allocation_bytes": 300,
+                "available_bytes": 700,
+            },
+        },
+    }
+
+
+def test_parse_host_stats_without_vms_or_pools():
+    host = _parse_host_stats(["x86_64", 2048, 2, 0, 1, 1, 2, 1], {}, {})
+
+    assert host["allocated_memory_bytes"] == 0
+    assert host["allocated_vcpus"] == 0
+    assert host["pools"] == {}
+
+
+def _host_mgr():
+    mgr = MagicMock()
+    mgr.conn.getAllDomainStats.return_value = []
+    mgr.conn.getInfo.return_value = ["x86_64", 8192, 4, 2100, 1, 1, 4, 1]
+    mgr.managed_specs.return_value = {"web-1": {"memory": 1024, "vcpus": 2}}
+    pools = {}
+    for name in ("vps-pool", "vps-seeds", "images", "default"):
+        pool = MagicMock()
+        pool.name.return_value = name
+        pool.info.return_value = [2, 1000, 400, 600]
+        pools[name] = pool
+    mgr.conn.listAllStoragePools.return_value = [
+        pools["vps-pool"],
+        pools["images"],
+        pools["default"],
+    ]
+    mgr.conn.storagePoolLookupByName.side_effect = lambda n: pools[n]
+    return mgr
+
+
+def test_collect_emits_host_metrics():
+    families = list(DomainCollector(_host_mgr).collect())
+
+    def value(name):
+        return _samples_by_name(families, name)[0].value
+
+    assert value("minivps_host_memory_bytes") == 8192 * 1024 * 1024
+    assert value("minivps_host_cpus") == 4
+    assert value("minivps_allocated_memory_bytes") == 1024 * 1024 * 1024
+    assert value("minivps_allocated_vcpus") == 2
+    # 存在するプールのうち minivps が使う3つだけを出す(無い vps-seeds は出さない)。
+    available = {
+        s.labels["pool"]: s.value
+        for s in _samples_by_name(families, "minivps_pool_available_bytes")
+    }
+    assert available == {"vps-pool": 600, "images": 600}
+    assert _samples_by_name(families, "minivps_pool_capacity_bytes")[0].value == 1000
+    assert _samples_by_name(families, "minivps_pool_allocation_bytes")[0].value == 400
+
+
+def test_collect_marks_scrape_failed_when_host_stats_fail():
+    mgr = _host_mgr()
+    mgr.conn.getInfo.side_effect = libvirt.libvirtError("connection lost")
+
+    families = list(DomainCollector(lambda: mgr).collect())
+
+    success = _samples_by_name(families, "minivps_exporter_scrape_success")
+    assert [s.value for s in success] == [0.0]
+    assert _samples_by_name(families, "minivps_host_memory_bytes") == []

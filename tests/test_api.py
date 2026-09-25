@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import mini_vps.api as api_module
 from mini_vps.manager import (
+    InsufficientCapacity,
     PlatformUnsupported,
     ServerConflict,
     ServerNotFound,
@@ -314,3 +315,70 @@ def test_lifespan_configures_logging(monkeypatch):
         pass
 
     assert captured == [True]
+
+
+# --- images / doctor / gc ---
+
+
+def test_list_images_returns_manager_images(client):
+    test_client, mock_manager = client
+    mock_manager.images.return_value = [{"name": "ubuntu.img", "used_by": ["web-1"]}]
+
+    response = test_client.get("/images")
+
+    assert response.status_code == 200
+    assert response.json() == {"images": [{"name": "ubuntu.img", "used_by": ["web-1"]}]}
+
+
+def test_get_doctor_reports_ok_false_on_error(client):
+    test_client, mock_manager = client
+    checks = [
+        {"level": "ok", "check": "lock_dir", "detail": "書き込める"},
+        {"level": "error", "check": "network:seg1", "detail": "存在しない"},
+    ]
+    mock_manager.doctor.return_value = checks
+
+    response = test_client.get("/doctor")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "checks": checks}
+
+
+def test_get_doctor_reports_ok_true_with_only_warnings(client):
+    test_client, mock_manager = client
+    mock_manager.doctor.return_value = [
+        {"level": "warn", "check": "accelerator", "detail": "tcg"}
+    ]
+
+    assert test_client.get("/doctor").json()["ok"] is True
+
+
+def test_post_gc_defaults_to_dry_run(client):
+    test_client, mock_manager = client
+    mock_manager.gc.return_value = {"applied": False, "orphans": []}
+
+    response = test_client.post("/gc")
+
+    assert response.status_code == 200
+    mock_manager.gc.assert_called_once_with(apply=False)
+
+
+def test_post_gc_applies_when_requested(client):
+    test_client, mock_manager = client
+    mock_manager.gc.return_value = {"applied": True}
+
+    test_client.post("/gc", json={"apply": True})
+
+    mock_manager.gc.assert_called_once_with(apply=True)
+
+
+def test_put_server_returns_507_when_capacity_is_insufficient(client):
+    test_client, mock_manager = client
+    mock_manager.create.side_effect = InsufficientCapacity("web-1: メモリが足りない")
+
+    response = test_client.put("/servers/web-1", json=PUT_BODY)
+
+    assert response.status_code == 507
+    assert response.json() == {
+        "detail": "insufficient capacity: web-1: メモリが足りない"
+    }

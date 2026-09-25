@@ -8,6 +8,7 @@ import pytest
 
 from mini_vps import cli
 from mini_vps.manager import (
+    InsufficientCapacity,
     PlatformUnsupported,
     ServerConflict,
     ServerNotFound,
@@ -452,3 +453,145 @@ def test_usage_error_keeps_exit_code_2_reserved_for_typer(mock_manager):
     )
 
     assert exit_code == 2
+
+
+# --- image list / doctor / gc ---
+
+
+def test_image_list_prints_table(mock_manager, capsys):
+    mock_manager.images.return_value = [
+        {
+            "name": "ubuntu-24.04.img",
+            "virtual_bytes": 3758096384,
+            "actual_bytes": 625262592,
+            "format": "qcow2",
+            "used_by": ["web-1", "web-2"],
+        },
+        {
+            "name": "old.img",
+            "virtual_bytes": 1024,
+            "actual_bytes": 512,
+            "format": None,
+            "used_by": [],
+        },
+    ]
+
+    exit_code = cli.main(["image", "list"], manager_factory=_factory(mock_manager))
+
+    assert exit_code == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].split() == ["NAME", "VIRTUAL", "ACTUAL", "FORMAT", "USED_BY"]
+    assert lines[1].split() == [
+        "ubuntu-24.04.img",
+        "3.5GiB",
+        "596.3MiB",
+        "qcow2",
+        "web-1,web-2",
+    ]
+    assert lines[2].split() == ["old.img", "1.0KiB", "512B", "-", "-"]
+
+
+def test_image_list_prints_nothing_without_images(mock_manager, capsys):
+    mock_manager.images.return_value = []
+
+    exit_code = cli.main(["image", "list"], manager_factory=_factory(mock_manager))
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_doctor_exits_zero_with_warnings_only(mock_manager, capsys):
+    mock_manager.doctor.return_value = [
+        {"level": "ok", "check": "lock_dir", "detail": "書き込める"},
+        {"level": "warn", "check": "accelerator", "detail": "tcg"},
+    ]
+
+    exit_code = cli.main(["doctor"], manager_factory=_factory(mock_manager))
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "ok     lock_dir: 書き込める",
+        "warn   accelerator: tcg",
+    ]
+
+
+def test_doctor_exits_nonzero_on_error(mock_manager, capsys):
+    mock_manager.doctor.return_value = [
+        {"level": "error", "check": "network:seg1", "detail": "存在しない"}
+    ]
+
+    exit_code = cli.main(["doctor"], manager_factory=_factory(mock_manager))
+
+    assert exit_code == 1
+    assert "error  network:seg1: 存在しない" in capsys.readouterr().out
+
+
+def test_gc_defaults_to_dry_run(mock_manager, capsys):
+    mock_manager.gc.return_value = {
+        "applied": False,
+        "orphans": [
+            {"kind": "overlay", "vm": "gone", "name": "gone.qcow2", "pool": "vps-pool"},
+            {"kind": "nwfilter", "vm": "gone", "name": "minivps-gone", "pool": None},
+        ],
+        "removed": [],
+        "skipped": [],
+    }
+
+    exit_code = cli.main(["gc"], manager_factory=_factory(mock_manager))
+
+    assert exit_code == 0
+    mock_manager.gc.assert_called_once_with(apply=False)
+    assert capsys.readouterr().out.splitlines() == [
+        "would remove: vps-pool/gone.qcow2",
+        "would remove: nwfilter/minivps-gone",
+    ]
+
+
+def test_gc_apply_prints_removed_and_skipped(mock_manager, capsys):
+    orphan = {"kind": "seed", "vm": "a", "name": "a-seed.iso", "pool": "vps-seeds"}
+    mock_manager.gc.return_value = {
+        "applied": True,
+        "orphans": [orphan, dict(orphan, vm="b", name="b-seed.iso")],
+        "removed": [orphan],
+        "skipped": [dict(orphan, vm="b", name="b-seed.iso", reason="既に無い")],
+    }
+
+    exit_code = cli.main(["gc", "--apply"], manager_factory=_factory(mock_manager))
+
+    assert exit_code == 0
+    mock_manager.gc.assert_called_once_with(apply=True)
+    assert capsys.readouterr().out.splitlines() == [
+        "removed: vps-seeds/a-seed.iso",
+        "skipped: vps-seeds/b-seed.iso (既に無い)",
+    ]
+
+
+def test_gc_reports_no_orphans(mock_manager, capsys):
+    mock_manager.gc.return_value = {
+        "applied": False,
+        "orphans": [],
+        "removed": [],
+        "skipped": [],
+    }
+
+    cli.main(["gc"], manager_factory=_factory(mock_manager))
+
+    assert capsys.readouterr().out.strip() == "no orphans"
+
+
+def test_create_returns_exit_code_11_when_capacity_is_insufficient(
+    mock_manager, tmp_path, capsys
+):
+    mock_manager.create.side_effect = InsufficientCapacity("web-1: vCPU が多すぎる")
+    spec_file = tmp_path / "vm.yaml"
+    spec_file.write_text(SPEC_YAML)
+
+    exit_code = cli.main(
+        ["create", str(spec_file)], manager_factory=_factory(mock_manager)
+    )
+
+    assert exit_code == 11
+    assert (
+        "error: insufficient capacity: web-1: vCPU が多すぎる"
+        in capsys.readouterr().err
+    )

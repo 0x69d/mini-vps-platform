@@ -94,6 +94,14 @@ class GuestExecError(MiniVpsError):
     """
 
 
+class InsufficientCapacity(MiniVpsError):
+    """ホストの容量(メモリ・vCPU・ディスク)が足りず、VM を作成・拡張できないことを表す。
+
+    作成してから OOM やディスク枯渇で落ちるより前に、約束しすぎない形で拒否する。
+    判定の式と設定は admission.py と docs/operations.md を参照。
+    """
+
+
 @dataclasses.dataclass(frozen=True)
 class ErrorMapping:
     """例外1種類分の正規化先。
@@ -121,6 +129,7 @@ ERROR_TABLE: dict[type[Exception], ErrorMapping] = {
     GuestAgentUnavailable: ErrorMapping(409, 9, "guest agent unavailable"),
     # 入力の誤り(argv・stdin・ゲストに無いコマンド)。1 は入力エラーの共通コード。
     GuestExecError: ErrorMapping(422, 1, "guest exec failed"),
+    InsufficientCapacity: ErrorMapping(507, 11, "insufficient capacity"),
 }
 
 
