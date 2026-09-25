@@ -218,6 +218,73 @@
         { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "rate(minivps_vm_disk_write_requests_total{vm=~\"$vm\"}[5m])", "legendFormat": "{{vm}}-{{device}}-write", "refId": "B" }
       ],
       "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "ホスト容量",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 69 },
+      "panels": []
+    },
+    {
+      "id": 51,
+      "type": "gauge",
+      "title": "メモリ割当率",
+      "description": "管理対象 VM の memory の合計(停止中を含む)÷ ホストの物理メモリ。1 を超えるとオーバーコミット。",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 70 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_allocated_memory_bytes / minivps_host_memory_bytes", "legendFormat": "割当 / ホスト", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1.5, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 0.8 }, { "color": "red", "value": 1 } ] } }, "overrides": [] }
+    },
+    {
+      "id": 52,
+      "type": "stat",
+      "title": "vCPU オーバーコミット率",
+      "description": "管理対象 VM の vCPU の合計(停止中を含む)÷ ホストの論理 CPU 数。",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 70 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_allocated_vcpus / minivps_host_cpus", "legendFormat": "割当 / 論理CPU", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 2 }, "overrides": [] }
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "メモリ: ホストと割当",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 70 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_host_memory_bytes", "legendFormat": "ホスト", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_allocated_memory_bytes", "legendFormat": "割当(全VM)", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "id": 54,
+      "type": "timeseries",
+      "title": "ストレージプール使用率",
+      "description": "dir 型プールは同じファイルシステムを共有することが多く、その場合は各プールが同じ値になる。",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 76 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_pool_allocation_bytes / minivps_pool_capacity_bytes", "legendFormat": "{{pool}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] }
+    },
+    {
+      "id": 55,
+      "type": "timeseries",
+      "title": "ストレージプール空き",
+      "description": "overlay は thin provisioning のため、VM の disk の合計より小さくても作成できる。",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 76 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "minivps_pool_available_bytes", "legendFormat": "{{pool}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
     }
   ]
 }
