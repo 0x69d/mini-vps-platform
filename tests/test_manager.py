@@ -20,6 +20,7 @@ from mini_vps.manager import (
     _write_spec,
     register_quiet_error_handler,
 )
+from mini_vps.planning import ApplyMode
 from mini_vps.platform_profile import set_profile
 from mini_vps.spec import ServerSpec
 
@@ -558,7 +559,7 @@ def test_create_converges_autostart_while_running_without_redefining(monkeypatch
     assert created is False
     dom.setAutostart.assert_called_once_with(0)
     conn.defineXML.assert_not_called()
-    write_spec_mock.assert_called_once_with(dom, new_spec)
+    write_spec_mock.assert_called_once_with(dom, new_spec, live=True)
 
 
 def test_create_rejects_unsupported_platform_before_touching_libvirt(monkeypatch):
@@ -612,7 +613,7 @@ def test_create_converges_memory_only_when_stopped(monkeypatch):
     dom.XMLDesc.assert_called_once_with(libvirt.VIR_DOMAIN_XML_INACTIVE)
     resize_xml_mock.assert_called_once_with("<domain/>", 2048 * 1024, 2)
     conn.defineXML.assert_called_once_with("<domain resized/>")
-    write_spec_mock.assert_called_once_with(new_dom, new_spec)
+    write_spec_mock.assert_called_once_with(new_dom, new_spec, live=False)
     assert result == mgr.get.return_value
 
 
@@ -1315,3 +1316,227 @@ def test_reinstall_registers_dns(monkeypatch):
     mgr.reinstall("web-1")
 
     register_mock.assert_called_once_with(spec)
+
+
+# --- 稼働中の反映(filters / egress) ---
+
+_LIVE_XML_TWO_NICS = """
+<domain type='kvm' id='3'>
+  <name>web-1</name>
+  <devices>
+    <interface type='network'>
+      <mac address='52:54:00:aa:bb:01'/>
+      <source network='default'/>
+      <target dev='vnet3'/>
+      {ref}
+    </interface>
+    <interface type='network'>
+      <mac address='52:54:00:aa:bb:02'/>
+      <source network='seg1'/>
+      <target dev='vnet4'/>
+      {ref}
+    </interface>
+  </devices>
+</domain>
+"""
+
+
+def _norm(**overrides):
+    return ServerSpec(**_full_spec(**overrides)).model_dump()
+
+
+def _converge_setup(monkeypatch, old_spec, running):
+    """_converge を通す create() の共通の差し替えを行い、(conn, mgr, dom) を返す。"""
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = running
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
+    monkeypatch.setattr(
+        "mini_vps.manager.build_nwfilter_xml", MagicMock(return_value="<filter/>")
+    )
+    mgr.get = MagicMock(return_value={"spec": {}, "status": {}})
+    return conn, mgr, dom
+
+
+def test_create_redefines_nwfilter_while_running_for_egress_rule_change(monkeypatch):
+    old_spec = _norm(egress=[{"cidr": "0.0.0.0/0"}])
+    new_spec = _norm(
+        egress=[{"action": "drop", "cidr": "10.0.0.0/8"}, {"cidr": "0.0.0.0/0"}]
+    )
+    conn, mgr, dom = _converge_setup(monkeypatch, old_spec, running=True)
+    write_spec_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager._write_spec", write_spec_mock)
+
+    mgr.create(new_spec)
+
+    # 同名 nwfilter の再定義だけで稼働中の VM に反映される。domain は触らない
+    conn.nwfilterDefineXML.assert_called_once_with("<filter/>")
+    conn.defineXML.assert_not_called()
+    dom.updateDeviceFlags.assert_not_called()
+    conn.nwfilterLookupByName.assert_not_called()
+    # live の metadata にも書き、次の create() が同じ差分を再収束させないようにする
+    write_spec_mock.assert_called_once_with(dom, new_spec, live=True)
+
+
+def test_create_redefines_nwfilter_while_running_for_filters_rule_change(
+    monkeypatch,
+):
+    old_spec = _norm(filters=[{"port": 22, "protocol": "tcp"}])
+    new_spec = _norm(filters=[{"port": 80, "protocol": "tcp"}])
+    conn, mgr, dom = _converge_setup(monkeypatch, old_spec, running=True)
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+
+    mgr.create(new_spec)
+
+    conn.nwfilterDefineXML.assert_called_once_with("<filter/>")
+    conn.defineXML.assert_not_called()
+    dom.updateDeviceFlags.assert_not_called()
+
+
+def test_create_attaches_filter_to_running_domain(monkeypatch):
+    old_spec = _norm()
+    new_spec = _norm(egress=[{"cidr": "0.0.0.0/0"}])
+    conn, mgr, dom = _converge_setup(monkeypatch, old_spec, running=True)
+    dom.XMLDesc.return_value = "<domain/>"
+    new_dom = MagicMock()
+    new_dom.XMLDesc.return_value = _LIVE_XML_TWO_NICS.format(ref="")
+    conn.defineXML.return_value = new_dom
+    set_filterref_mock = MagicMock(return_value="<domain filtered/>")
+    monkeypatch.setattr("mini_vps.manager.set_domain_filterref_xml", set_filterref_mock)
+    write_spec_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager._write_spec", write_spec_mock)
+
+    mgr.create(new_spec)
+
+    # config: 停止中と同じ差分編集 + defineXML(次回起動時の定義)
+    dom.XMLDesc.assert_called_once_with(libvirt.VIR_DOMAIN_XML_INACTIVE)
+    set_filterref_mock.assert_called_once_with("<domain/>", "minivps-web-1")
+    conn.defineXML.assert_called_once_with("<domain filtered/>")
+    # live: interface ごとに filterref を付けて AFFECT_LIVE で更新する
+    new_dom.XMLDesc.assert_called_once_with(0)
+    assert new_dom.updateDeviceFlags.call_count == 2
+    for call in new_dom.updateDeviceFlags.call_args_list:
+        iface_xml, flags = call.args
+        assert "minivps-web-1" in iface_xml
+        assert flags == libvirt.VIR_DOMAIN_AFFECT_LIVE
+    # nwfilter は filterref を付ける前に定義しておく
+    call_names = [c[0] for c in conn.mock_calls]
+    assert call_names.index("nwfilterDefineXML") < call_names.index("defineXML")
+    write_spec_mock.assert_called_once_with(new_dom, new_spec, live=True)
+
+
+def test_create_detaches_filter_from_running_domain_before_undefining(monkeypatch):
+    old_spec = _norm(egress=[])
+    new_spec = _norm()
+    conn, mgr, dom = _converge_setup(monkeypatch, old_spec, running=True)
+    dom.XMLDesc.return_value = "<domain filtered/>"
+    new_dom = MagicMock()
+    new_dom.XMLDesc.return_value = _LIVE_XML_TWO_NICS.format(
+        ref="<filterref filter='minivps-web-1'/>"
+    )
+    conn.defineXML.return_value = new_dom
+    monkeypatch.setattr(
+        "mini_vps.manager.set_domain_filterref_xml",
+        MagicMock(return_value="<domain unfiltered/>"),
+    )
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+    nwfilter = MagicMock()
+    nwfilter.name.return_value = "minivps-web-1"
+    conn.listAllNWFilters.return_value = [nwfilter]
+    # 呼び出し順を1本の記録で比べるため、live 更新を conn の子として記録する
+    conn.attach_mock(new_dom.updateDeviceFlags, "live_update")
+
+    mgr.create(new_spec)
+
+    conn.nwfilterDefineXML.assert_not_called()
+    assert new_dom.updateDeviceFlags.call_count == 2
+    for call in new_dom.updateDeviceFlags.call_args_list:
+        assert "filterref" not in call.args[0]
+    # config と live の両方から外した後でないと undefine できない
+    call_names = [c[0] for c in conn.mock_calls]
+    undefine_index = call_names.index("nwfilterLookupByName().undefine")
+    assert call_names.index("defineXML") < undefine_index
+    assert max(i for i, n in enumerate(call_names) if n == "live_update") < (
+        undefine_index
+    )
+
+
+def test_create_attaches_filter_to_stopped_domain_without_live_update(monkeypatch):
+    old_spec = _norm()
+    new_spec = _norm(egress=[{"cidr": "0.0.0.0/0"}])
+    conn, mgr, dom = _converge_setup(monkeypatch, old_spec, running=False)
+    dom.XMLDesc.return_value = "<domain/>"
+    new_dom = MagicMock()
+    conn.defineXML.return_value = new_dom
+    monkeypatch.setattr(
+        "mini_vps.manager.set_domain_filterref_xml",
+        MagicMock(return_value="<domain filtered/>"),
+    )
+    write_spec_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager._write_spec", write_spec_mock)
+
+    mgr.create(new_spec)
+
+    conn.defineXML.assert_called_once_with("<domain filtered/>")
+    new_dom.updateDeviceFlags.assert_not_called()
+    dom.updateDeviceFlags.assert_not_called()
+    write_spec_mock.assert_called_once_with(new_dom, new_spec, live=False)
+
+
+def test_create_keeps_filter_when_filters_removed_but_egress_remains(monkeypatch):
+    old_spec = _norm(filters=[{"port": 22, "protocol": "tcp"}], egress=[])
+    new_spec = _norm(egress=[])
+    conn, mgr, dom = _converge_setup(monkeypatch, old_spec, running=True)
+    monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
+
+    mgr.create(new_spec)
+
+    # filter の有無は変わらないので、ルールの再定義だけで済む
+    conn.nwfilterDefineXML.assert_called_once_with("<filter/>")
+    conn.defineXML.assert_not_called()
+    dom.updateDeviceFlags.assert_not_called()
+    conn.nwfilterLookupByName.assert_not_called()
+
+
+def test_create_rejects_running_filter_attach_when_attach_mode_is_offline(
+    monkeypatch,
+):
+    monkeypatch.setattr("mini_vps.planning.FILTER_ATTACH_APPLY_MODE", ApplyMode.OFFLINE)
+    conn, mgr, dom = _converge_setup(monkeypatch, _norm(), running=True)
+
+    with pytest.raises(ServerRunning, match="egress"):
+        mgr.create(_norm(egress=[]))
+
+    conn.nwfilterDefineXML.assert_not_called()
+    conn.defineXML.assert_not_called()
+
+
+def test_create_rejects_egress_on_unsupported_platform(monkeypatch):
+    set_profile(macos_profile())
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    find_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager._find_domain", find_mock)
+
+    with pytest.raises(PlatformUnsupported, match="egress"):
+        mgr.create(_norm(egress=[{"cidr": "0.0.0.0/0"}]))
+
+    find_mock.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("live", "expected_flags"),
+    [
+        (False, libvirt.VIR_DOMAIN_AFFECT_CONFIG),
+        (True, libvirt.VIR_DOMAIN_AFFECT_CONFIG | libvirt.VIR_DOMAIN_AFFECT_LIVE),
+    ],
+)
+def test_write_spec_flags(live, expected_flags):
+    dom = MagicMock()
+
+    _write_spec(dom, {"name": "web-1"}, live=live)
+
+    assert dom.setMetadata.call_args.args[4] == expected_flags

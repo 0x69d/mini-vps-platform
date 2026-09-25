@@ -104,6 +104,19 @@ def test_provision_defines_nwfilter_when_filters_present(stub_provision_deps):
     conn.defineXML.assert_called_once_with("<domain/>")
 
 
+@pytest.mark.parametrize("egress", [[], [{"cidr": "0.0.0.0/0"}]])
+def test_provision_defines_nwfilter_when_only_egress_present(
+    stub_provision_deps, egress
+):
+    conn = MagicMock()
+    spec = {"name": "web-1", "filters": None, "egress": egress}
+
+    provision(conn, spec)
+
+    conn.nwfilterDefineXML.assert_called_once_with("<filter/>")
+    assert stub_provision_deps.call_args.kwargs["filter_name"] == "minivps-web-1"
+
+
 def test_provision_skips_nwfilter_when_absent(stub_provision_deps):
     conn = MagicMock()
     spec = {"name": "web-1"}

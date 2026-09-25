@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import ipaddress
 import logging
 import re
 import socket
@@ -16,6 +17,13 @@ from .config import (
     BASE_POOL,
     GUEST_AGENT_CHANNEL,
     META_DATA_TEMPLATE,
+    NWFILTER_EGRESS_HEAD_RULES,
+    NWFILTER_EGRESS_PRIORITY_START,
+    NWFILTER_EGRESS_RULE_TEMPLATE,
+    NWFILTER_EGRESS_TAIL_RULES,
+    NWFILTER_INBOUND_ACCEPT_ALL_RULE,
+    NWFILTER_INBOUND_DROP_RULE,
+    NWFILTER_OUTBOUND_ACCEPT_ALL_RULE,
     NWFILTER_PORT_RULE_TEMPLATE,
     NWFILTER_XML_TEMPLATE,
     OVERLAY_VOL_XML_TEMPLATE,
@@ -339,16 +347,75 @@ def _filter_name(spec) -> str:
     return f"minivps-{spec['name']}"
 
 
-def build_nwfilter_xml(spec) -> str:
-    """spec["filters"] から VM 専用の nwfilter XML を組み立てて返す。
+def needs_nwfilter(spec) -> bool:
+    """VM 専用の nwfilter(と interface の filterref)が spec に必要かを返す。
 
-    呼び出し側で spec["filters"] is not None を確認済みであることが前提。
+    filters と egress がどちらも None のときだけ不要(inbound も outbound も全許可)。
+    空リストは「全拒否」を意味するため必要側に入る(truthy 判定にしないこと)。
+    provision・_converge・planning がこの1つの判定を共有する。
     """
-    port_rules = "".join(
-        NWFILTER_PORT_RULE_TEMPLATE.format(protocol=f["protocol"], port=f["port"])
-        for f in spec["filters"]
+    return spec.get("filters") is not None or spec.get("egress") is not None
+
+
+def _egress_rule_xml(rule: dict, priority: int) -> str:
+    """Egress ルール1件を nwfilter の <rule> に変換する。
+
+    宛先が 0.0.0.0/0 のときは dstipaddr/dstipmask を省く(全宛先に一致させる)。
+    dstipmask は libvirt の IP_MASK 型で、CIDR の接頭辞長(0-32)をそのまま書ける。
+    """
+    network = ipaddress.IPv4Network(rule["cidr"])
+    attrs = ""
+    if network.prefixlen != 0:
+        attrs += (
+            f" dstipaddr='{network.network_address}' dstipmask='{network.prefixlen}'"
+        )
+    if rule.get("port") is not None:
+        attrs += f" dstportstart='{int(rule['port'])}'"
+    return NWFILTER_EGRESS_RULE_TEMPLATE.format(
+        action=rule.get("action", "accept"),
+        priority=priority,
+        protocol=rule.get("protocol", "all"),
+        attrs=attrs,
     )
-    return NWFILTER_XML_TEMPLATE.format(name=_filter_name(spec), port_rules=port_rules)
+
+
+def build_nwfilter_xml(spec) -> str:
+    """VM 専用の nwfilter XML を filters(inbound)と egress(outbound)から作る。
+
+    呼び出し側で needs_nwfilter(spec) を確認済みであることが前提。
+
+    inbound: filters がリストなら宣言ポートだけ accept して残りを drop、None なら
+    全 accept。outbound: egress が None なら全 accept(従来どおり)、リストなら
+    戻り通信・DHCP を先に accept し、egress ルールを記述順に単調増加する priority で
+    並べ、最後に既定 drop を置く。nwfilter は記述順ではなく priority 昇順で評価する
+    ため、egress の順序は priority で表す。
+    """
+    filters = spec.get("filters")
+    egress = spec.get("egress")
+
+    rules = ""
+    if filters is not None:
+        rules += "".join(
+            NWFILTER_PORT_RULE_TEMPLATE.format(protocol=f["protocol"], port=f["port"])
+            for f in filters
+        )
+    elif egress is not None:
+        rules += NWFILTER_INBOUND_ACCEPT_ALL_RULE
+
+    if egress is None:
+        rules += NWFILTER_OUTBOUND_ACCEPT_ALL_RULE
+    else:
+        rules += NWFILTER_EGRESS_HEAD_RULES
+        rules += "".join(
+            _egress_rule_xml(rule, NWFILTER_EGRESS_PRIORITY_START + index)
+            for index, rule in enumerate(egress)
+        )
+        rules += NWFILTER_EGRESS_TAIL_RULES
+
+    if filters is not None:
+        rules += NWFILTER_INBOUND_DROP_RULE
+
+    return NWFILTER_XML_TEMPLATE.format(name=_filter_name(spec), rules=rules)
 
 
 def _sub(parent: ET.Element, tag: str, text: str | None = None, **attrs):
@@ -579,3 +646,41 @@ def set_domain_filterref_xml(xml_text: str, filter_name: str | None) -> str:
             filterref_el.set("filter", filter_name)
 
     return ET.tostring(root, encoding="unicode")
+
+
+def live_filterref_updates(xml_text: str, filter_name: str | None) -> list[str]:
+    """稼働中の domain XML から、filterref を付け外しした interface XML を作る。
+
+    set_domain_filterref_xml の稼働中版。dom.XMLDesc(0)(live の定義)を受け取り、
+    filterref が filter_name と異なる interface だけを、filterref を書き換えた
+    <interface> 要素の XML として返す。呼び出し側はこれを1件ずつ
+    dom.updateDeviceFlags(..., VIR_DOMAIN_AFFECT_LIVE) に渡す。
+
+    live の interface XML(target dev・alias・PCI address・source の portid を含む)
+    をそのまま往復させるのは、libvirt(qemuDomainChangeNet)が filterref 以外の
+    差分を「稼働中に変更できない」として拒否するため(virsh domif-setlink と同じ
+    手法)。既に filter_name と一致する interface は除くので、途中で失敗して
+    再実行しても同じ結果に収束する。filterref に子要素(<parameter>)があっても
+    付け替え時は落とす(minivps の nwfilter は変数を使わない)。
+
+    Args:
+        xml_text: 稼働中の domain XML。
+        filter_name: 付ける nwfilter 名。None なら filterref を外す。
+
+    Returns:
+        更新が要る interface の XML のリスト(無ければ空)。
+    """
+    root = ET.fromstring(xml_text)
+    updates = []
+    for interface_el in root.findall("devices/interface"):
+        filterref_el = interface_el.find("filterref")
+        current = filterref_el.get("filter") if filterref_el is not None else None
+        if current == filter_name:
+            continue
+        if filterref_el is not None:
+            interface_el.remove(filterref_el)
+        if filter_name is not None:
+            ET.SubElement(interface_el, "filterref", filter=filter_name)
+        interface_el.tail = None
+        updates.append(ET.tostring(interface_el, encoding="unicode"))
+    return updates

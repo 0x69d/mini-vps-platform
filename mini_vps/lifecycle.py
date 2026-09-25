@@ -15,6 +15,7 @@ from .resources import (
     build_nwfilter_xml,
     build_seed_iso,
     create_overlay_volume,
+    needs_nwfilter,
     ssh_forward_port,
 )
 from .spec import read_pubkey
@@ -40,9 +41,10 @@ def ensure_network_active(conn, spec) -> None:
 def provision(conn, spec, secrets: dict[str, str] | None = None) -> libvirt.virDomain:
     """VM を定義し、未起動の domain を返す。
 
-    nwfilter(任意) → seed → overlay → domain XML → defineXML → autostart の順に
-    処理する。起動前に metadata を付与するため、起動は呼び出し側が行う。seed を
-    overlay より先に作るのは、secrets 不足を安価に検知するため。
+    nwfilter(filters か egress があるとき) → seed → overlay → domain XML →
+    defineXML → autostart の順に処理する。起動前に metadata を付与するため、起動は
+    呼び出し側が行う。seed を overlay より先に作るのは、secrets 不足を安価に検知
+    するため。
 
     user-mode ネットワーク(macOS)では SSH を転送するホストポートをここで割り当て、
     domain XML に書き込む。
@@ -52,7 +54,7 @@ def provision(conn, spec, secrets: dict[str, str] | None = None) -> libvirt.virD
     ensure_network_active(conn, spec)
 
     filter_name = None
-    if spec.get("filters") is not None:
+    if needs_nwfilter(spec):
         conn.nwfilterDefineXML(build_nwfilter_xml(spec))
         filter_name = _filter_name(spec)
         _LOGGER.info("%s: nwfilter %s を定義", name, filter_name)

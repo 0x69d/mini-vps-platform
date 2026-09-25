@@ -27,7 +27,7 @@ from .errors import (  # noqa: F401  (manager から import する既存コー�
 from .images import list_images
 from .lifecycle import _lease_ipv4, ensure_network_active, provision, teardown
 from .locks import NameLocks
-from .planning import Action, check_platform, plan_change
+from .planning import FILTER_FIELDS, Action, check_platform, plan_change
 from .platform_profile import get_profile
 from .resources import (
     _filter_name,
@@ -35,6 +35,8 @@ from .resources import (
     build_nwfilter_xml,
     build_seed_iso,
     create_overlay_volume,
+    live_filterref_updates,
+    needs_nwfilter,
     resize_domain_xml,
     set_domain_filterref_xml,
     ssh_forward_port,
@@ -84,19 +86,26 @@ def register_quiet_error_handler() -> None:
     libvirt.registerErrorHandler(_log_libvirt_error, None)
 
 
-def _write_spec(dom, spec: dict) -> None:
+def _write_spec(dom, spec: dict, live: bool | None = None) -> None:
     """VM スペックを YAML 化し、dom の <metadata> に書き込む。
 
     ElementTree でテキストノードを組むことで、spec 値の & < > が自動エスケープされる。
     新規作成時は起動前に書くため AFFECT_CONFIG だけで足り、起動時の live が CONFIG を
-    引き継ぐ。稼働中の domain(autostart・stack など稼働中に反映できる差分の収束)では
-    AFFECT_LIVE も付ける。_read_spec(flags=0 = AFFECT_CURRENT)は稼働中なら live 側を
-    読むため、CONFIG だけを書き換えると次の停止まで古い spec が読み戻される。
+    引き継ぐ。稼働中の domain(autostart・stack・filters など稼働中に反映できる差分の
+    収束)では AFFECT_LIVE も付ける。_read_spec(flags=0 = AFFECT_CURRENT)は稼働中なら
+    live 側を読むため、CONFIG だけを書き換えると次の停止まで古い spec が読み戻され、
+    次の create() が同じ差分を何度も収束させてしまう。
+
+    Args:
+        dom: 書き込み先の domain。
+        spec: 書き込む VM スペック。
+        live: 稼働中の domain の live 定義にも書くか。None なら
+            dom.isActive() で決める。
     """
     el = ET.Element("spec")
     el.text = yaml.safe_dump(spec)
     flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
-    if dom.isActive():
+    if dom.isActive() if live is None else live:
         flags |= libvirt.VIR_DOMAIN_AFFECT_LIVE
     dom.setMetadata(
         libvirt.VIR_DOMAIN_METADATA_ELEMENT,
@@ -260,11 +269,11 @@ class ServerManager:
 
         既存と spec が完全一致すれば無変更で現状を返す(冪等 no-op)。相違がある場合は
         planning.plan_change でフィールドごとの反映方式を判定する。稼働中に反映できる
-        差分(autostart)はその場で、停止中にしか反映できない差分(memory/vcpus/
-        filters)は停止中の domain に限り収束させる(稼働中は ServerRunning)。
+        差分(autostart/filters/egress)はその場で、停止中にしか反映できない差分
+        (memory/vcpus)は停止中の domain に限り収束させる(稼働中は ServerRunning)。
         再作成が必要な差分、または管理対象外の同名 domain は破壊せず
-        ServerConflict で拒否する。このホストで実現できない機能(macOS での filters
-        など)はロックを取る前に PlatformUnsupported で拒否する。
+        ServerConflict で拒否する。このホストで実現できない機能(macOS での filters /
+        egress など)はロックを取る前に PlatformUnsupported で拒否する。
         新規作成時は metadata を起動前に付け、失敗時は teardown で巻き戻して
         all-or-nothing にする。
 
@@ -320,7 +329,8 @@ class ServerManager:
             # (例: nameservers 追加前に作った VM)。Pydantic を通して欠落フィールドに
             # デフォルトを補完し、同じ YAML の再 create が差分扱いにならないようにする。
             old_spec = ServerSpec(**_read_spec(existing)).model_dump()
-            change = plan_change(old_spec, spec, running=bool(existing.isActive()))
+            running = bool(existing.isActive())
+            change = plan_change(old_spec, spec, running=running)
             if change.action is Action.NOOP:
                 _LOGGER.info("%s: 既存と一致、変更なし", name)
                 return self.get(name), False
@@ -338,59 +348,98 @@ class ServerManager:
                 # 自分自身の現在の割当は evaluate が name で除くため二重計上しない。
                 check_capacity(self.conn, spec, self.managed_specs, include_disk=False)
             _LOGGER.info("%s: 差分を収束 fields=%s", name, sorted(change.diff_keys))
-            dom = self._converge(existing, old_spec, spec, set(change.diff_keys))
+            dom = self._converge(
+                existing, old_spec, spec, set(change.diff_keys), running=running
+            )
             # _write_spec が失敗しても domain 実体側はロールバックしない。_converge の
             # 各操作(resize/filterref 設定/nwfilter 定義・削除/autostart)は全遷移
             # パターンで冪等なため、同じ spec で create() を再実行すれば自己修復する。
-            _write_spec(dom, spec)
+            _write_spec(dom, spec, live=running)
             return self.get(name), False
 
-    def _converge(self, dom, old_spec: dict, new_spec: dict, diff_keys: set) -> object:
+    def _converge(
+        self,
+        dom,
+        old_spec: dict,
+        new_spec: dict,
+        diff_keys: set,
+        running: bool = False,
+    ) -> object:
         """可変フィールドの差分を domain に適用する。
 
-        反映方式は planning.FIELD_APPLY_MODES が決める。autostart は稼働中でも
-        setAutostart で反映する。memory/vcpus/filters は停止中の domain にだけ適用する
+        反映方式は planning.field_apply_mode が決める。autostart は稼働中でも
+        setAutostart で反映する。memory/vcpus は停止中の domain にだけ適用する
         (稼働中なら呼び出し前に ServerRunning で拒否済み)。
 
-        dom.XMLDesc(INACTIVE) を最小差分編集して defineXML する。build_domain_xml に
-        よるテンプレート再構築ではなく既存定義への差分編集にすることで、MAC アドレス・
-        UUID の意図しない再生成を避ける。nwfilter は使用中(domain の filterref から
-        参照されている間)は undefine できないため(teardown() 参照)、フィルタ解除時は
-        defineXML で filterref を外した後に undefine する。フィルタ新設時は逆に
-        nwfilterDefineXML で先に定義してから defineXML で filterref を付ける
-        (provision() と同じ順序)。undefine 前には teardown() と同じく存在確認する
-        (_write_spec 失敗後に create() が再実行された場合、前回既に undefine 済みの
-        filter に対して呼ばれる可能性があるため)。
+        filters / egress は VM 専用 nwfilter の中身で、nwfilterDefineXML で同名の
+        filter を再定義すると libvirt が稼働中の VM のインターフェースにも即時反映する。
+        filter の有無が変わる(filterref の付け外しが要る)ときは、domain 定義
+        (config)の filterref を書き換え、稼働中なら live の interface にも
+        updateDeviceFlags(AFFECT_LIVE)で付け外しする。
+
+        domain 定義は dom.XMLDesc(INACTIVE) を最小差分編集して defineXML する。
+        build_domain_xml によるテンプレート再構築ではなく既存定義への差分編集にする
+        ことで、MAC アドレス・UUID の意図しない再生成を避ける。稼働中の domain に
+        defineXML しても変わるのは次回起動時の定義だけで、live には影響しない。
+
+        nwfilter は使用中(domain の filterref から参照されている間)は undefine
+        できないため(teardown() 参照)、フィルタ解除時は config と live の両方から
+        filterref を外した後に undefine する。フィルタ新設時は逆に
+        nwfilterDefineXML で先に定義してから filterref を付ける(provision() と同じ
+        順序)。undefine 前には teardown() と同じく存在確認する(_write_spec 失敗後に
+        create() が再実行された場合、前回既に undefine 済みの filter に対して
+        呼ばれる可能性があるため)。
+
+        Args:
+            dom: 収束させる domain。
+            old_spec: 既存の spec(ServerSpec で補完済み)。
+            new_spec: 新しい spec。
+            diff_keys: 値が異なるフィールド名。
+            running: domain が稼働中か。
 
         Returns:
-            defineXML 後の domain(filters/memory/vcpus のいずれの差分も無ければ
-            引数の dom をそのまま返す)。
+            defineXML 後の domain(domain 定義を書き換えなければ引数の dom)。
         """
         if "autostart" in diff_keys:
             dom.setAutostart(1 if new_spec.get("autostart", True) else 0)
-        if not diff_keys & {"memory", "vcpus", "filters"}:
-            return dom
 
-        xml = dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+        filter_changed = bool(diff_keys & FILTER_FIELDS)
+        filter_name = _filter_name(new_spec)
+        old_has_filter = needs_nwfilter(old_spec)
+        new_has_filter = needs_nwfilter(new_spec)
+        attach_changed = filter_changed and old_has_filter != new_has_filter
+        target_filter = filter_name if new_has_filter else None
 
-        if diff_keys & {"memory", "vcpus"}:
-            xml = resize_domain_xml(xml, new_spec["memory"] * 1024, new_spec["vcpus"])
+        # 同名での再定義は、この filter を参照する稼働中の VM にも libvirt が反映する。
+        if filter_changed and new_has_filter:
+            self.conn.nwfilterDefineXML(build_nwfilter_xml(new_spec))
+            _LOGGER.debug("nwfilter %s を定義", filter_name)
 
-        filter_name = None
-        should_undefine = False
-        if "filters" in diff_keys:
-            filter_name = _filter_name(new_spec)
-            has_filter = new_spec.get("filters") is not None
-            should_undefine = old_spec.get("filters") is not None and not has_filter
-            if has_filter:
-                self.conn.nwfilterDefineXML(build_nwfilter_xml(new_spec))
-            xml = set_domain_filterref_xml(xml, filter_name if has_filter else None)
+        if diff_keys & {"memory", "vcpus"} or attach_changed:
+            xml = dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+            if diff_keys & {"memory", "vcpus"}:
+                xml = resize_domain_xml(
+                    xml, new_spec["memory"] * 1024, new_spec["vcpus"]
+                )
+            if attach_changed:
+                xml = set_domain_filterref_xml(xml, target_filter)
+            dom = self.conn.defineXML(xml)
 
-        dom = self.conn.defineXML(xml)
+        if running and attach_changed:
+            for iface_xml in live_filterref_updates(dom.XMLDesc(0), target_filter):
+                dom.updateDeviceFlags(iface_xml, libvirt.VIR_DOMAIN_AFFECT_LIVE)
+            _LOGGER.debug(
+                "%s: 稼働中の interface の filterref を更新 filter=%s",
+                new_spec["name"],
+                target_filter,
+            )
 
-        if should_undefine and filter_name in {
-            f.name() for f in self.conn.listAllNWFilters()
-        }:
+        if (
+            filter_changed
+            and old_has_filter
+            and not new_has_filter
+            and filter_name in {f.name() for f in self.conn.listAllNWFilters()}
+        ):
             self.conn.nwfilterLookupByName(filter_name).undefine()
             _LOGGER.debug("nwfilter %s を削除", filter_name)
 

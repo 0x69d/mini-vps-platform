@@ -1,9 +1,12 @@
+import pathlib
+
 import pytest
 import yaml
 from pydantic import ValidationError
 
 from mini_vps.spec import (
     SAMPLE_SPEC,
+    EgressRule,
     FilterRule,
     NetworkAttachment,
     ServerSpec,
@@ -399,3 +402,120 @@ def test_load_spec_rejects_missing_required_key():
     text = yaml.safe_dump({"name": "web-1"})
     with pytest.raises(ValidationError):
         load_spec(text)
+
+
+# --- EgressRule / egress ---
+
+
+def test_egress_rule_applies_defaults():
+    rule = EgressRule(cidr="0.0.0.0/0")
+    assert rule.action == "accept"
+    assert rule.protocol == "all"
+    assert rule.port is None
+
+
+def test_egress_rule_treats_bare_address_as_single_host():
+    assert str(EgressRule(cidr="192.168.122.1").cidr) == "192.168.122.1/32"
+
+
+def test_egress_rule_serializes_cidr_as_string():
+    dumped = EgressRule(
+        action="drop", cidr="10.0.0.0/8", protocol="tcp", port=443
+    ).model_dump()
+    assert dumped == {
+        "action": "drop",
+        "cidr": "10.0.0.0/8",
+        "protocol": "tcp",
+        "port": 443,
+    }
+    # metadata へ yaml.safe_dump で永続化できること
+    yaml.safe_dump(dumped)
+
+
+@pytest.mark.parametrize("protocol", ["tcp", "udp"])
+def test_egress_rule_accepts_port_with_tcp_or_udp(protocol):
+    assert EgressRule(cidr="1.1.1.1/32", protocol=protocol, port=53).port == 53
+
+
+def test_egress_rule_rejects_port_with_all_protocol():
+    with pytest.raises(ValidationError, match="port"):
+        EgressRule(cidr="1.1.1.1/32", port=53)
+
+
+@pytest.mark.parametrize("port", [0, 65536])
+def test_egress_rule_rejects_out_of_range_port(port):
+    with pytest.raises(ValidationError):
+        EgressRule(cidr="1.1.1.1/32", protocol="tcp", port=port)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"action": "reject"},
+        {"protocol": "icmp"},
+        # ホストビットが立った CIDR は意図が曖昧なため拒否する
+        {"cidr": "192.168.122.1/24"},
+        {"cidr": "not-a-cidr"},
+        {"cidr": "fd00::/8"},
+    ],
+)
+def test_egress_rule_rejects_invalid_values(overrides):
+    with pytest.raises(ValidationError):
+        EgressRule(**({"cidr": "10.0.0.0/8"} | overrides))
+
+
+def test_server_spec_egress_defaults_to_none():
+    # metadata に egress が無い既存 VM を ServerSpec で補完しても None になり、
+    # egress を書いていない YAML の再 create が差分扱いにならない。
+    assert ServerSpec(**_base_spec_dict()).model_dump()["egress"] is None
+
+
+def test_server_spec_keeps_empty_egress_as_deny_all():
+    assert ServerSpec(**_base_spec_dict(egress=[])).egress == []
+
+
+def test_server_spec_egress_preserves_order():
+    spec = ServerSpec(
+        **_base_spec_dict(
+            egress=[
+                {"cidr": "192.168.122.1/32", "protocol": "udp", "port": 53},
+                {"action": "drop", "cidr": "10.0.0.0/8"},
+                {"cidr": "0.0.0.0/0"},
+            ]
+        )
+    ).model_dump()
+    assert [r["cidr"] for r in spec["egress"]] == [
+        "192.168.122.1/32",
+        "10.0.0.0/8",
+        "0.0.0.0/0",
+    ]
+
+
+def test_server_spec_rejects_too_many_egress_rules():
+    rules = [{"cidr": f"10.{i // 256}.{i % 256}.0/24"} for i in range(500)]
+    with pytest.raises(ValidationError):
+        ServerSpec(**_base_spec_dict(egress=rules))
+
+
+def test_load_spec_roundtrips_egress_through_yaml():
+    spec = load_spec(
+        yaml.safe_dump(
+            _base_spec_dict(egress=[{"cidr": "1.1.1.1", "protocol": "udp", "port": 53}])
+        )
+    )
+    # metadata の YAML を読み戻して ServerSpec に通しても同じ値になる(差分にならない)
+    assert ServerSpec(**yaml.safe_load(yaml.safe_dump(spec))).model_dump() == spec
+
+
+def test_load_spec_parses_agent_home_example():
+    path = pathlib.Path(__file__).parent.parent / "examples" / "agent-home.yaml"
+    spec = load_spec(path.read_text())
+    assert spec["filters"] == [{"port": 22, "protocol": "tcp"}]
+    # DNS の許可が drop より前、インターネットへの accept が最後
+    assert spec["egress"][0]["port"] == 53
+    assert spec["egress"][-1] == {
+        "action": "accept",
+        "cidr": "0.0.0.0/0",
+        "protocol": "all",
+        "port": None,
+    }
