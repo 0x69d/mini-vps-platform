@@ -30,6 +30,7 @@ from .logging_config import configure as configure_logging
 from .manager import ServerManager, register_quiet_error_handler
 from .platform_profile import get_profile
 from .spec import ServerSpec
+from .stack import StackDefinition, apply_stack, plan_stack, resolve_stack
 from .startup_scripts import StartupScriptError
 
 _LOGGER = logging.getLogger(__name__)
@@ -169,7 +170,110 @@ def build_server(manager: ServerManager, allow_destructive: bool = False) -> MCP
         """VM を再起動する(disk・spec・IP は変えない)。"""
         return await tools.call(manager.restart, name, force=force)
 
+    @server.tool(annotations=NON_IDEMPOTENT)
+    async def exec_command(
+        name: str, argv: list[str], stdin: str | None = None, timeout: float = 60
+    ) -> dict:
+        """稼働中の VM の中でコマンドを実行し、終了コード・stdout・stderr を返す。
+
+        qemu-guest-agent 経由でゲスト内 root として実行する(SSH もネットワークも不要)。
+        argv はシェルを介さない。パイプなどが要るなら ["sh", "-c", "..."]。
+        timeout を超えると timed_out=true と pid を返し、プロセスはゲストで走り続ける。
+        """
+        return await tools.call(manager.exec, name, argv, stdin=stdin, timeout=timeout)
+
+    @server.tool(annotations=IDEMPOTENT)
+    async def pause_server(name: str) -> dict:
+        """VM をその場で凍結する(CPU を止める。メモリとディスクはそのまま)。"""
+        return await tools.call(manager.pause, name)
+
+    @server.tool(annotations=IDEMPOTENT)
+    async def resume_server(name: str) -> dict:
+        """pause_server で凍結した VM を再開する。"""
+        return await tools.call(manager.resume, name)
+
+    @server.tool(annotations=READ_ONLY)
+    async def ssh_endpoint(name: str) -> dict:
+        """VM へ SSH するための host・port・user・identity_file を返す。"""
+        return await tools.call(manager.ssh_endpoint, name)
+
+    @server.tool(annotations=NON_IDEMPOTENT)
+    async def create_snapshot(name: str, snap: str, quiesce: bool = False) -> dict:
+        """VM のディスクのチェックポイントを取る。危険な操作の前に使う。
+
+        メモリの状態は含まない。quiesce=true はゲストのファイルシステムを凍結して
+        から取る(guest agent が要る)。
+        """
+        return await tools.call(manager.snapshot_create, name, snap, quiesce=quiesce)
+
+    @server.tool(annotations=READ_ONLY)
+    async def list_snapshots(name: str) -> dict:
+        """VM のスナップショットの一覧を返す。"""
+        return {"snapshots": await tools.call(manager.snapshot_list, name)}
+
+    @server.tool(name="plan_stack", annotations=READ_ONLY)
+    async def plan_stack_tool(stack: dict, prune: bool = False) -> dict:
+        """スタック(stack 名と servers のリスト)と既存 VM の差分を計画する。
+
+        何も変更しない。stack の形はスタックファイル(docs/stacks.md)と同じ。
+        """
+        resolved = await tools.call(
+            lambda: resolve_stack(StackDefinition.model_validate(stack))
+        )
+        plan = await tools.call(plan_stack, manager, resolved, prune=prune)
+        return plan.to_dict()
+
+    @server.tool(name="apply_stack", annotations=IDEMPOTENT)
+    async def apply_stack_tool(
+        stack: dict,
+        prune: bool = False,
+        wait: bool = False,
+        secrets: dict[str, dict[str, str]] | None = None,
+    ) -> dict:
+        """スタックを依存順に一括で作成・収束する。
+
+        再作成が必要な差分があれば何も変えずに失敗する。prune(スタックから消えた
+        VM の削除)は破壊的な操作が許可されているときだけ使える。
+        """
+        if prune and not allow_destructive:
+            raise ToolError(
+                "prune は VM を削除するため、"
+                f"{_ALLOW_DESTRUCTIVE_ENV_VAR}=1 のときだけ使えます"
+            )
+        resolved = await tools.call(
+            lambda: resolve_stack(StackDefinition.model_validate(stack))
+        )
+        return await tools.call(
+            apply_stack, manager, resolved, prune=prune, wait=wait, secrets=secrets
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def list_images() -> dict:
+        """Base image の一覧(仮想サイズ・参照している VM)を返す。"""
+        return {"images": await tools.call(manager.images)}
+
+    @server.tool(annotations=READ_ONLY)
+    async def doctor() -> dict:
+        """ホストの前提と孤児リソースを検査する。"""
+        return {"checks": await tools.call(manager.doctor)}
+
     if allow_destructive:
+
+        @server.tool(annotations=DESTRUCTIVE)
+        async def revert_snapshot(name: str, snap: str) -> dict:
+            """VM のディスクをスナップショット時点へ戻す。それ以降の変更は失われる。"""
+            return await tools.call(manager.snapshot_revert, name, snap)
+
+        @server.tool(annotations=DESTRUCTIVE)
+        async def delete_snapshot(name: str, snap: str) -> dict:
+            """スナップショットを削除する(中身は1つ下の層へマージされる)。"""
+            await tools.call(manager.snapshot_delete, name, snap)
+            return {"deleted": f"{name}/{snap}"}
+
+        @server.tool(annotations=DESTRUCTIVE)
+        async def gc(apply: bool = False) -> dict:
+            """孤児リソースを回収する。apply=false なら削除予定を返すだけ。"""
+            return await tools.call(manager.gc, apply=apply)
 
         @server.tool(annotations=DESTRUCTIVE)
         async def delete_server(name: str) -> dict:

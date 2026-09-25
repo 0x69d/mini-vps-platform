@@ -4,10 +4,15 @@
 [![Python](https://img.shields.io/badge/python-3.14%2B-3776ab)](https://www.python.org/)
 [![libvirt](https://img.shields.io/badge/libvirt-qemu%3A%2F%2F%2Fsystem-orange)](https://libvirt.org/)
 
-QEMU/KVM + libvirt + Python で構築する、VPS サービスの最小版。
+QEMU/KVM + libvirt + Python で構築する、**AI エージェントの住処**になる単一ホスト仮想化基盤。
+Linux(KVM)と macOS(Apple Silicon / Intel の HVF)を標準でサポートする。
 
-宣言的な YAML 入力を受け取り、ローカルマシン上に仮想サーバーをプロビジョニングする。
+宣言的な YAML / JSON 入力を受け取り、ローカルマシン上に仮想サーバーをプロビジョニングする。
 クラウドでいう「コントロールプレーン」の中核、つまり宣言的入力からリソース確保までの翻訳を自作する。
+そのうえで、エージェントを VM の中で安全に長時間働かせるための機能を持つ:
+外向き通信の許可リスト(egress)、SSH 不要のコマンド実行(exec)、一時停止、スナップショットと
+巻き戻し、複数 VM の plan / apply、そしてエージェント自身が VM を操作するための MCP サーバ。
+方向性と設計の理由は [docs/single-host-roadmap.md](docs/single-host-roadmap.md) を参照。
 
 ![Grafana ダッシュボード](docs/images/grafana-overview.png)
 
@@ -98,19 +103,29 @@ flowchart TB
 - NAT ネットワーク: libvirt の仮想ブリッジ経由でゲストを外向き通信させる。
 - セグメント分離: 複数の独立 NAT ネットワークで VM を隔離する。
 - パケットフィルタ: `filters` で宣言した inbound ポートのみ許可する。
-  作成後に `vm-spec.yaml` を編集して再度 `create`/`PUT` することで変更もできる。
+- egress 許可リスト: `egress` で外向き通信を CIDR・ポート単位で記述順に許可/遮断する。
+  `filters`・`egress` のルール変更は稼働中の VM にも停止せずに反映する。
 - 静的IP割当: `networks` の要素に `NetworkAttachment`を指定すると、cloud-init の `network-config` 経由で固定IPを割り当てる。
-- 監視: Prometheus + Grafana によってメトリクスを可視化する。
+- エージェントの監督: qemu-guest-agent 経由の `exec`、`pause`/`resume`、`ssh`/`console`、
+  ディスクのスナップショットと巻き戻し。
+- スタック: 複数 VM を1ファイルにまとめ、`plan` で差分を見て `apply` で依存順に適用する。
+- ホストの安全: 作成前の容量チェック、`autostart`、`doctor`/`gc`(孤児リソースの検出・回収)、
+  CLI・API・MCP をまたぐプロセス間ロック。
+- 監視: Prometheus + Grafana によってメトリクス(VM ごと・ホスト全体の割当)を可視化する。
+- 入口: CLI(YAML)・Web API(JSON)・MCP サーバ(エージェント向け)・Prometheus エクスポーター。
 
 ### 含まないもの
 
 - 複数物理ホストへのスケジューリング。
 - マルチテナンシー、課金、認証などの大規模運用機構。
-- パケットフィルタの IPv6・egress・稼働中 VM へのライブ反映。ルール変更は停止中の VM に
-  限り inbound・IPv4 のみ対応。
+- パケットフィルタの IPv6 ルール指定(egress 指定時は IPv6 の送信を遮断する)と、
+  ドメイン名単位の egress 許可([docs/egress.md](docs/egress.md) 参照)。
 - アラート通知。
-- `networks`・`static_routes` は `create()` の可変フィールドではない。
-  `startup_script` と同様、変更するには対象 VM の削除・再作成が必要。
+- 稼働中の memory・vCPU の変更(停止中なら収束できる)。
+- `networks`・`static_routes`・`startup_script` などは再作成が必要なフィールドで、
+  変更するには対象 VM の削除・再作成が必要(フィールドごとの反映方式は
+  `mini_vps/planning.py` の `FIELD_APPLY_MODES`)。
+- 委譲トークンによる「子 VM」(ロードマップのフェーズ4。設計のみ)。
 
 ## アーキテクチャ
 
@@ -125,29 +140,50 @@ flowchart TB
     subgraph entry["入口層 — ServerManager の薄いラッパー"]
         CLI["cli.py<br/>Typer CLI"]
         API["api.py<br/>FastAPI"]
+        MCP["mcp_server.py<br/>MCP(エージェント向け)"]
         EXP["exporter.py<br/>Prometheus エクスポーター"]
     end
 
-    SPEC["spec.py — 検証の真実源<br/>ServerSpec / FilterRule / NetworkAttachment"]
-    MGR["manager.py — ServerManager<br/>name を主キーに write を直列化"]
+    SPEC["spec.py — 検証の真実源<br/>ServerSpec / FilterRule / EgressRule / NetworkAttachment"]
+    STK["stack.py — plan / apply<br/>複数 VM を依存順に"]
+    MGR["manager.py — ServerManager<br/>name を主キーに write を直列化(locks.py)"]
+    PLAN["planning.py<br/>フィールドごとの反映方式・プラットフォーム検査"]
+    PROF["platform_profile.py<br/>Linux KVM/TCG ・ macOS HVF"]
 
     subgraph lower["下位層"]
-        LC["lifecycle.py<br/>provision / teardown / wait_for_ip"]
-        RES["resources.py<br/>domain XML・nwfilter XML<br/>overlay volume・seed ISO"]
+        LC["lifecycle.py<br/>provision / teardown"]
+        RES["resources.py<br/>domain XML・nwfilter XML<br/>overlay volume・seed ISO(pycdlib)"]
+        GA["guest_agent.py<br/>exec・IP"]
+        SNAP["snapshots.py"]
+        ADM["admission.py / doctor.py / images.py"]
         DNS["dns_registration.py<br/>nsupdate で A/PTR 登録"]
     end
 
-    LV["libvirtd — qemu:///system"]
+    LV["libvirtd — qemu:///system<br/>(macOS は qemu:///session)"]
     DOM["libvirt domain<br/>metadata に spec を格納"]
 
     Y --> CLI
     J --> API
+    AG["AI エージェント"] --> MCP
     CLI --> SPEC
     API --> SPEC
+    MCP --> SPEC
     SPEC --> MGR
+    CLI --> STK
+    API --> STK
+    MCP --> STK
+    STK --> MGR
     EXP -.->|"読み取り専用"| MGR
+    MGR --> PLAN
+    PROF -.-> MGR
+    PROF -.-> RES
     MGR --> LC
     MGR --> RES
+    MGR --> GA
+    MGR --> SNAP
+    MGR --> ADM
+    GA --> LV
+    SNAP --> LV
     MGR -.->|"opt-in・ベストエフォート"| DNS
     LC --> LV
     RES --> LV
@@ -180,6 +216,10 @@ disk: 10                      # GB
 | `filters` | list[[FilterRule](docs/spec.md#複合型)] \| null | 任意 | 未指定(null)なら全 inbound 許可。`[]` を明示すると全 inbound 拒否 |
 | `static_routes` | list[[StaticRoute](docs/spec.md#複合型)] | 任意 | 未指定なら追加ルート無し |
 | `startup_script` | str \| null | 任意 | 未指定(null)。指定する場合は既知のテンプレート名のみ許可 |
+| `egress` | list[[EgressRule](docs/egress.md)] \| null | 任意 | 未指定(null)なら外向き全許可。リストは記述順に評価し最後に既定 drop |
+| `autostart` | bool | 任意 | `true`(ホストの起動時に VM も起動する) |
+| `stack` | str \| null | 任意 | 未指定(null)。所属スタック名([docs/stacks.md](docs/stacks.md)) |
+| `depends_on` | list[str] | 任意 | `[]`。スタックの適用順と起動待ちに使う |
 
 > **警告**: `filters` を1件でも宣言すると、明示したポート以外の inbound は SSH(22番)を含めて
 > すべて拒否される。SSH アクセスを維持したい場合は `{port: 22, protocol: "tcp"}` を
@@ -194,6 +234,13 @@ disk: 10                      # GB
 | スタティックルート | `static_routes` | [docs/spec.md](docs/spec.md#スタティックルート) |
 | スタートアップスクリプト | `startup_script` | [docs/startup-scripts.md](docs/startup-scripts.md) |
 | DNS レコード自動登録 | — | [docs/dns-registration.md](docs/dns-registration.md) |
+| egress 許可リスト | `egress` | [docs/egress.md](docs/egress.md) |
+| スタック(plan / apply) | `stack`・`depends_on` | [docs/stacks.md](docs/stacks.md) |
+| exec・ssh・console・pause | — | [docs/guest-agent.md](docs/guest-agent.md) |
+| スナップショット | — | [docs/snapshots.md](docs/snapshots.md) |
+| 容量チェック・image list・doctor/gc・ホストメトリクス | — | [docs/operations.md](docs/operations.md) |
+| macOS | — | [docs/macos.md](docs/macos.md) |
+| MCP サーバ | — | [本ファイルの「7. MCP サーバ」](#7-mcp-サーバエージェント向け) |
 
 静的IP割当とスタティックルートは、どちらも cloud-init 由来の制約が実装の形を決めている。
 `network-config` を渡すとそれが唯一の設定源になるため、DHCP の NIC も含めて全 NIC を
@@ -202,8 +249,9 @@ MAC マッチで列挙する。`runcmd` は初回起動時にしか実行され�
 
 ## 必要環境
 
-- Linux（KVM 対応 CPU、`/dev/kvm` 利用可）
-- QEMU/KVM, libvirt デーモン
+- Linux（KVM 対応 CPU、`/dev/kvm` 利用可。無ければ TCG で動くが大幅に遅い）、QEMU/KVM, libvirt デーモン
+- または macOS(Homebrew の libvirt + QEMU。`scripts/macos-setup.sh` で一括セットアップ。
+  [docs/macos.md](docs/macos.md))
 - [uv](https://docs.astral.sh/uv/)
 - ビルド依存（libvirt-python は PyPI で sdist のみ提供のため、`uv add` 時にソースビルドが走る）: libvirt の開発ヘッダ + Python 開発ヘッダ（`Python.h`）+ pkg-config + C コンパイラ
 
@@ -273,6 +321,15 @@ uv run mini-vps stop web-1
 uv run mini-vps restart web-1
 uv run mini-vps reinstall web-1
 uv run mini-vps delete web-1
+
+# エージェントの住処として使うとき
+uv run mini-vps exec web-1 -- uname -a         # SSH 不要のコマンド実行
+uv run mini-vps pause web-1                    # 暴走したエージェントを凍結
+uv run mini-vps snapshot create web-1 before   # 危険な操作の前のチェックポイント
+uv run mini-vps snapshot revert web-1 before   # 巻き戻し
+uv run mini-vps plan examples/agent-stack.yaml # 複数 VM の差分
+uv run mini-vps apply examples/agent-stack.yaml --wait
+uv run mini-vps doctor                         # ホストの前提と孤児リソースの検査
 ```
 
 | サブコマンド | 説明 |
@@ -286,6 +343,13 @@ uv run mini-vps delete web-1
 | `restart <name> [--force]` | disk を保持したまま VM を再起動する(不在なら終了コード 3) |
 | `delete <name>` | VM を削除する(不在/管理外なら終了コード 3) |
 | `reinstall <name>` | disk を base から作り直して再起動する(不在なら終了コード 3) |
+| `exec <name> -- CMD...` | guest agent 経由でゲスト内のコマンドを実行する(`--raw`・`--stdin`・`--timeout`) |
+| `ssh <name>` / `console <name>` | SSH / シリアルコンソールで接続する |
+| `pause <name>` / `resume <name>` | VM を一時停止 / 再開する |
+| `snapshot create\|list\|revert\|delete <name> [snap]` | ディスクのスナップショット([docs/snapshots.md](docs/snapshots.md)) |
+| `plan <file> [--prune]` / `apply <file> [--prune] [--wait]` | スタックの差分表示 / 一括適用([docs/stacks.md](docs/stacks.md)) |
+| `image list` | base image と参照している VM |
+| `doctor` / `gc [--apply]` | ホストの検査 / 孤児リソースの回収([docs/operations.md](docs/operations.md)) |
 
 実行例。`get` が返す spec は libvirt domain の `<metadata>` から読み戻したもので、
 `hostname`・`user` のように spec ファイルで指定しなかった項目も `spec.py` の既定値で
@@ -345,11 +409,11 @@ $ uv run mini-vps get web-1
 停止中の VM に `restart`(force 無し)を実行すると終了コード 5(`ServerNotRunning`)
 で拒否する。
 
-`create` を既存 VM に対して再実行すると、`memory`/`vcpus`/`filters` の差分のみ
-収束させる(それ以外のフィールドの差分は spec 相違として終了コード 4
-(`ServerConflict`)で拒否する)。収束はドメイン停止中の VM のみ許可し、
-稼働中に実行すると終了コード 6(`ServerRunning`)で拒否する(先に `stop` してから
-再実行する)。
+`create` を既存 VM に対して再実行すると、差分をフィールドごとの反映方式で収束させる。
+`autostart`・`filters`・`egress`・`stack`・`depends_on` は稼働中でも停止せずに反映する。
+`memory`/`vcpus` は停止中の VM にだけ反映し、稼働中なら終了コード 6(`ServerRunning`)で
+拒否する(先に `stop` してから再実行する)。それ以外のフィールドの差分は再作成が必要で、
+終了コード 4(`ServerConflict`)で拒否する。
 
 #### 終了コード
 
@@ -363,6 +427,11 @@ $ uv run mini-vps get web-1
 | 5 | `ServerNotRunning` — 停止中の VM に稼働前提の操作を要求した |
 | 6 | `ServerRunning` — 稼働中の VM に停止前提の操作を要求した |
 | 7 | libvirt エラー(`libvirtd` 停止・接続不可など) |
+| 8 | `PlatformUnsupported` — このホストで実現できない機能(macOS での `filters`・`egress`・セグメントなど) |
+| 9 | `GuestAgentUnavailable` — ゲストの qemu-guest-agent を使えない |
+| 10 | `SnapshotNotFound` — 指定したスナップショットが無い |
+| 11 | `InsufficientCapacity` — ホストの容量が足りない |
+| 12 | `StackError` — スタックの検証・計画・適用の失敗 |
 
 1 は入力(spec ファイル・`--startup-param`)の誤り、3 以降は VM の状態に起因する
 拒否を表す。2 は Click(Typer の基盤)が `UsageError` に予約しているため使わない。
@@ -483,6 +552,26 @@ Prometheus・Grafana とも `network_mode: host` で動作し、`127.0.0.1` に�
 
 停止する場合は `docker compose down`(データは named volume に残る)。データも含めて
 完全に削除する場合は `docker compose down -v` を使う。
+
+### 7. MCP サーバ(エージェント向け)
+
+Claude Code などの AI エージェントが VM を操作するための4つ目の入口。CLI・Web API と同じく
+`ServerManager` の薄いラッパーで、transport は stdio。
+
+```bash
+# Claude Code に登録する例
+claude mcp add mini-vps -- uv --directory /path/to/mini-vps-platform run mini-vps-mcp
+```
+
+| ツール | 種類 |
+|---|---|
+| `list_servers`・`get_server`・`server_status`・`ssh_endpoint`・`list_snapshots`・`list_images`・`doctor`・`plan_stack` | 読み取り専用 |
+| `create_server`・`start_server`・`stop_server`・`restart_server`・`pause_server`・`resume_server`・`exec_command`・`create_snapshot`・`apply_stack` | 変更(データは失わない) |
+| `delete_server`・`reinstall_server`・`revert_snapshot`・`delete_snapshot`・`gc`、`apply_stack` の `prune` | 破壊的。`MINIVPS_MCP_ALLOW_DESTRUCTIVE=1` のときだけ登録する |
+
+破壊的なツールは既定では登録しないため、エージェントからは存在自体が見えない。
+エージェントに VM を渡すときの既定を「壊せない」側に倒すための設計。エラーは CLI・API と同じ
+ラベル(`server not found: ...` など)で返る。
 
 ## ログ
 

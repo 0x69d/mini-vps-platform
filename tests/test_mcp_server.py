@@ -117,3 +117,74 @@ def test_delete_server_delegates_when_allowed(manager):
     )
     assert result == {"deleted": "web-1"}
     manager.delete.assert_called_once_with("web-1")
+
+
+def test_agent_home_tools_are_registered(manager):
+    names = _tool_names(build_server(manager))
+    assert {
+        "exec_command",
+        "pause_server",
+        "resume_server",
+        "ssh_endpoint",
+        "create_snapshot",
+        "list_snapshots",
+        "plan_stack",
+        "apply_stack",
+        "list_images",
+        "doctor",
+    } <= names
+    assert not {"revert_snapshot", "delete_snapshot", "gc"} & names
+
+
+def test_snapshot_revert_and_gc_require_destructive(manager):
+    names = _tool_names(build_server(manager, allow_destructive=True))
+    assert {"revert_snapshot", "delete_snapshot", "gc"} <= names
+
+
+def test_exec_command_delegates_to_manager(manager):
+    manager.exec.return_value = {"exit_code": 0, "stdout": "ok\n", "stderr": ""}
+
+    result = _call(
+        build_server(manager), "exec_command", name="agent-1", argv=["echo", "ok"]
+    )
+
+    assert result["stdout"] == "ok\n"
+    manager.exec.assert_called_once_with(
+        "agent-1", ["echo", "ok"], stdin=None, timeout=60
+    )
+
+
+STACK = {
+    "stack": "agents",
+    "servers": [
+        {
+            "name": "agent-1",
+            "memory": 1024,
+            "vcpus": 1,
+            "base_image": "ubuntu-24.04.img",
+            "disk": 10,
+        }
+    ],
+}
+
+
+def test_apply_stack_refuses_prune_unless_destructive_allowed(manager, monkeypatch):
+    apply_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.mcp_server.apply_stack", apply_mock)
+
+    message = _call_error(build_server(manager), "apply_stack", stack=STACK, prune=True)
+
+    assert "MINIVPS_MCP_ALLOW_DESTRUCTIVE" in message
+    apply_mock.assert_not_called()
+
+
+def test_apply_stack_passes_validated_stack(manager, monkeypatch):
+    apply_mock = MagicMock(return_value={"applied": ["agent-1"]})
+    monkeypatch.setattr("mini_vps.mcp_server.apply_stack", apply_mock)
+
+    result = _call(build_server(manager), "apply_stack", stack=STACK)
+
+    assert result == {"applied": ["agent-1"]}
+    stack = apply_mock.call_args.args[1]
+    assert stack.name == "agents"
+    assert stack.servers["agent-1"]["stack"] == "agents"
