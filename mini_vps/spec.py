@@ -32,6 +32,9 @@ _USERNAME_PATTERN = r"^[a-z_][a-z0-9_-]{0,31}$"
 # networks の要素用。_NAME_PATTERN と同じ文字種制約を list の各要素に適用する。
 _NetworkName = Annotated[str, StringConstraints(pattern=_NAME_PATTERN)]
 
+# depends_on の要素用。VM の name と同じ文字種制約を list の各要素に適用する。
+_ServerName = Annotated[str, StringConstraints(pattern=_NAME_PATTERN)]
+
 # NetworkAttachment.search の要素用。netplan の nameservers.search へ yaml.safe_dump
 # 経由で埋め込むドメイン名。DNS の search ドメインは慣例上アンダースコアを含まない
 # ため _NAME_PATTERN は流用せず、RFC 1123 のホスト名ラベル(英数字始まり・ハイフン可・
@@ -131,6 +134,19 @@ class ServerSpecInput(BaseModel):
     startup_script: str | None = None
     # ホスト(libvirt)の起動時に VM も起動するか。稼働中でも反映できる。
     autostart: bool = True
+    # 所属スタック名(stack.py)。apply --prune が「このスタックの VM か」を判定する
+    # ラベルで、domain には影響しない。スタックファイル経由なら自動で補完される。
+    stack: str | None = Field(default=None, pattern=_NAME_PATTERN)
+    # 先に作成・起動しておく VM の name(同じスタック内、または既存の管理 VM)。
+    # plan/apply の適用順を決めるだけで、domain には影響しない。
+    depends_on: list[_ServerName] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_depends_on_unique(self) -> ServerSpecInput:
+        """depends_on の重複を拒否する(設定ミスの可能性が高いため)。"""
+        if len(self.depends_on) != len(set(self.depends_on)):
+            raise ValueError(f"depends_on に重複があります: {self.depends_on!r}")
+        return self
 
     @model_validator(mode="after")
     def _validate_networks_unique(self) -> ServerSpecInput:
@@ -167,6 +183,13 @@ class ServerSpec(ServerSpecInput):
         """未指定なら name から hostname を補完する。"""
         if self.hostname is None:
             self.hostname = self.name
+        return self
+
+    @model_validator(mode="after")
+    def _validate_not_depends_on_self(self) -> ServerSpec:
+        """自分自身への depends_on を拒否する(自明な循環のため)。"""
+        if self.name in self.depends_on:
+            raise ValueError(f"depends_on に自分自身({self.name})は指定できません")
         return self
 
 

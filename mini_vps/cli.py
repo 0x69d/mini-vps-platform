@@ -21,6 +21,7 @@ from .logging_config import configure as configure_logging
 from .manager import ServerManager, register_quiet_error_handler
 from .platform_profile import get_profile
 from .spec import load_spec
+from .stack import DEFAULT_WAIT_TIMEOUT, apply_stack, load_stack, plan_stack
 from .startup_scripts import StartupScriptError
 
 # add_completion=False: 運用ツールにシェル補完は不要なため。
@@ -182,6 +183,90 @@ def _cmd_create(
     return result
 
 
+# plan/apply で共有するオプションの型。
+_StackFileArgument = Annotated[str, typer.Argument(help="スタックファイル(YAML)のパス")]
+_PruneOption = Annotated[
+    bool,
+    typer.Option(
+        "--prune",
+        help="同じ stack ラベルを持つがファイルに無い VM を削除する",
+    ),
+]
+
+
+def _parse_server_startup_params(pairs: list[str]) -> dict[str, dict[str, str]]:
+    """--startup-param SERVER:KEY=VALUE(apply 用)を server ごとの dict に変換する。
+
+    server の name は ":" を含みえない(spec の name 制約)ため、先頭の ":" で分ける。
+    KEY=VALUE 側は _parse_startup_params と同じ規則。形式不正は StartupScriptError。
+    """
+    secrets: dict[str, dict[str, str]] = {}
+    for pair in pairs:
+        server, sep, rest = pair.partition(":")
+        if not sep or not server:
+            raise StartupScriptError(
+                "invalid --startup-param (expected SERVER:KEY=VALUE): "
+                f"{pair.partition('=')[0]!r}"
+            )
+        secrets.setdefault(server, {}).update(_parse_startup_params([rest]))
+    return secrets
+
+
+def _read_stack(stack_file: str):
+    """スタックファイルを読み込み、検証済みの Stack を返す。"""
+    with open(stack_file, encoding="utf-8") as f:
+        return load_stack(f.read())
+
+
+@_command("plan", help="スタックファイルと既存 VM の差分(変更計画)を表示する")
+def _cmd_plan(
+    ctx: typer.Context,
+    stack_file: _StackFileArgument,
+    prune: _PruneOption = False,
+) -> dict:
+    """スタックの変更計画を返す。何も変更しない(stack.plan_stack 参照)。"""
+    return plan_stack(ctx.obj, _read_stack(stack_file), prune=prune).to_dict()
+
+
+@_command("apply", help="スタックファイルの VM を依存順に一括で作成・収束する")
+def _cmd_apply(
+    ctx: typer.Context,
+    stack_file: _StackFileArgument,
+    prune: _PruneOption = False,
+    wait: Annotated[
+        bool,
+        typer.Option("--wait", help="依存先の VM が起動し IP を得るまで待ってから進む"),
+    ] = False,
+    wait_timeout: Annotated[
+        float,
+        typer.Option("--wait-timeout", min=1, help="依存先1台あたりの待ち時間(秒)"),
+    ] = DEFAULT_WAIT_TIMEOUT,
+    startup_param: Annotated[
+        list[str],
+        typer.Option(
+            "--startup-param",
+            metavar="SERVER:KEY=VALUE",
+            help="server の startup_script に渡す秘密パラメータ(複数回指定可)",
+        ),
+    ] = [],
+) -> dict:
+    """スタックを適用する。
+
+    conflict / blocked_running を含む計画は何も変更せずに拒否する。途中で失敗したら
+    適用済みと未適用の VM を報告して止める(stack.apply_stack 参照)。
+    """
+    stack = _read_stack(stack_file)
+    secrets = _parse_server_startup_params(startup_param)
+    return apply_stack(
+        ctx.obj,
+        stack,
+        prune=prune,
+        wait=wait,
+        secrets=secrets,
+        wait_timeout=wait_timeout,
+    )
+
+
 @_command("get", help="VM の spec と状態を取得する")
 def _cmd_get(ctx: typer.Context, name: str) -> dict:
     """指定 VM の spec と状態を返す。"""
@@ -268,6 +353,7 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
         - 6: ServerRunning(create が可変フィールド差分を起動中の VM に
           適用しようとした場合を含む)
         - 7: libvirtError(libvirtd 停止・接続不可など)
+        - 12: StackError(スタックの検証・計画・適用の失敗)
     """
     factory = manager_factory or _open_manager
     try:

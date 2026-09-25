@@ -1,0 +1,50 @@
+# エージェントの住処の例: 内部 DNS(dns-1)と、それを名前解決に使うエージェント用 VM 2台。
+#
+#   uv run mini-vps plan examples/agent-stack.yaml
+#   uv run mini-vps apply examples/agent-stack.yaml --wait
+#
+# 詳しくは docs/stacks.md。各 server は単体の VM spec(docs/spec.md)と同じ形で、
+# stack は省略すると先頭の stack で補完される。
+#
+# 注意: default ネットワーク(192.168.122.0/24)の DHCP レンジは .2〜.254 で、下の
+# 静的アドレスと重なりうる(docs/spec.md の「静的IP割当」の既知の制約)。実運用では
+# DHCP レンジを狭めるか、セグメントを使うこと。DNS サーバ自体(dns-1 の中の
+# unbound / dnsmasq など)の構築はこの例の範囲外。
+stack: agents
+servers:
+  - name: dns-1
+    memory: 1024
+    vcpus: 1
+    base_image: ubuntu-24.04.img
+    disk: 10
+    networks:
+      - name: default
+        address: 192.168.122.53/24
+        gateway: 192.168.122.1
+        nameservers: [192.168.122.1]
+
+  - name: agent-1
+    memory: 4096
+    vcpus: 2
+    base_image: ubuntu-24.04.img
+    disk: 30
+    depends_on: [dns-1]
+    networks:
+      - name: default
+        address: 192.168.122.61/24
+        gateway: 192.168.122.1
+        nameservers: [192.168.122.53]
+        search: [minivps.internal]
+
+  - name: agent-2
+    memory: 4096
+    vcpus: 2
+    base_image: ubuntu-24.04.img
+    disk: 30
+    depends_on: [dns-1]
+    networks:
+      - name: default
+        address: 192.168.122.62/24
+        gateway: 192.168.122.1
+        nameservers: [192.168.122.53]
+        search: [minivps.internal]

@@ -86,6 +86,28 @@ def test_write_then_read_spec_roundtrips():
     assert _read_spec(dom) == spec
 
 
+def test_write_spec_affects_config_only_when_inactive():
+    """新規作成時(起動前)は永続定義だけに書く。"""
+    dom = MagicMock()
+    dom.isActive.return_value = 0
+
+    _write_spec(dom, {"name": "web-1"})
+
+    assert dom.setMetadata.call_args.args[4] == libvirt.VIR_DOMAIN_AFFECT_CONFIG
+
+
+def test_write_spec_also_affects_live_when_active():
+    """稼働中の収束では live 側にも書く(_read_spec は稼働中なら live を読むため)。"""
+    dom = MagicMock()
+    dom.isActive.return_value = 1
+
+    _write_spec(dom, {"name": "web-1"})
+
+    assert dom.setMetadata.call_args.args[4] == (
+        libvirt.VIR_DOMAIN_AFFECT_CONFIG | libvirt.VIR_DOMAIN_AFFECT_LIVE
+    )
+
+
 # --- _lookup ---
 
 
