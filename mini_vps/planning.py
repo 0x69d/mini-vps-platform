@@ -34,6 +34,10 @@ FIELD_APPLY_MODES: dict[str, ApplyMode] = {
     "vcpus": ApplyMode.OFFLINE,
     "filters": ApplyMode.OFFLINE,
     "autostart": ApplyMode.LIVE,
+    # stack / depends_on は plan/apply(stack.py)だけが読むラベルで、domain には
+    # 影響しない。metadata の書き換えだけで反映できる。
+    "stack": ApplyMode.LIVE,
+    "depends_on": ApplyMode.LIVE,
 }
 
 

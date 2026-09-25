@@ -17,6 +17,13 @@ from .logging_config import configure as configure_logging
 from .manager import ServerManager, register_quiet_error_handler
 from .platform_profile import get_profile
 from .spec import ServerSpec, ServerSpecInput
+from .stack import (
+    DEFAULT_WAIT_TIMEOUT,
+    StackDefinition,
+    apply_stack,
+    plan_stack,
+    resolve_stack,
+)
 from .startup_scripts import StartupScriptError
 
 logger = logging.getLogger(__name__)
@@ -69,6 +76,24 @@ class PowerActionRequest(BaseModel):
     """POST /servers/{name}/stop, /restart の任意 body。"""
 
     force: bool = False
+
+
+class StackPlanRequest(StackDefinition):
+    """POST /stacks/plan の body(スタックファイルと同じ構造 + prune)。"""
+
+    prune: bool = False
+
+
+class StackApplyRequest(StackPlanRequest):
+    """POST /stacks/apply の body。
+
+    secrets は server の name → startup_script に渡す秘密情報。apply_stack() が
+    ServerManager.create() にだけ渡し、spec/metadata・ログ・応答には載せない。
+    """
+
+    wait: bool = False
+    wait_timeout: float = Field(default=DEFAULT_WAIT_TIMEOUT, gt=0, le=3600)
+    secrets: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 def get_manager(request: Request) -> ServerManager:
@@ -155,6 +180,37 @@ def put_server(
     result, created = mgr.create(spec, secrets=secrets or None)
     response.status_code = 201 if created else 200
     return result
+
+
+@app.post("/stacks/plan")
+def plan_stack_endpoint(
+    body: StackPlanRequest, mgr: ServerManager = Depends(get_manager)
+) -> dict:
+    """スタックと既存 VM の差分(変更計画)を返す。何も変更しない。
+
+    スタックとして不正(name の重複・depends_on の循環や未知の参照など)なら 422。
+    """
+    return plan_stack(mgr, resolve_stack(body), prune=body.prune).to_dict()
+
+
+@app.post("/stacks/apply")
+def apply_stack_endpoint(
+    body: StackApplyRequest, mgr: ServerManager = Depends(get_manager)
+) -> dict:
+    """スタックの VM を依存順に一括で作成・収束する。
+
+    conflict / blocked_running を含む計画は何も変更せずに 422 で拒否する。途中で
+    失敗した場合も 422 で、detail に適用済みと未適用の VM を示す。wait=true なら
+    依存先の起動を待つため、応答まで数分かかりうる。
+    """
+    return apply_stack(
+        mgr,
+        resolve_stack(body),
+        prune=body.prune,
+        wait=body.wait,
+        secrets=body.secrets,
+        wait_timeout=body.wait_timeout,
+    )
 
 
 @app.post("/servers/{name}/start")

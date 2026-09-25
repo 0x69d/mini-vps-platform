@@ -54,6 +54,28 @@ class PlatformUnsupported(MiniVpsError):
     """
 
 
+class StackError(MiniVpsError):
+    """スタック(複数 VM の spec の組)を計画・適用できないことを表す。
+
+    例: name の重複・depends_on の未知の参照や循環・再作成が必要な差分を含む
+    apply・適用途中の失敗(どこまで適用したかをメッセージに含める)。
+
+    Attributes:
+        applied: 適用途中で失敗した場合に、適用済みの VM の name。
+        pending: 適用途中で失敗した場合に、未適用の VM の name(失敗した VM を含む)。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        applied: list[str] | None = None,
+        pending: list[str] | None = None,
+    ):
+        super().__init__(message)
+        self.applied = list(applied or [])
+        self.pending = list(pending or [])
+
+
 @dataclasses.dataclass(frozen=True)
 class ErrorMapping:
     """例外1種類分の正規化先。
@@ -77,6 +99,7 @@ ERROR_TABLE: dict[type[Exception], ErrorMapping] = {
     ServerRunning: ErrorMapping(409, 6, "server running"),
     # 7 は libvirtError(ホスト側の障害 / 503)。libvirt は入口層でだけ扱う。
     PlatformUnsupported: ErrorMapping(422, 8, "platform unsupported"),
+    StackError: ErrorMapping(422, 12, "stack error"),
 }
 
 
