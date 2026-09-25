@@ -18,6 +18,7 @@ from pydantic import (
     model_validator,
 )
 
+from .config import EGRESS_MAX_RULES
 from .startup_scripts import STARTUP_SCRIPT_NAMES
 
 # name/network/hostname 用。libvirt domain XML(str.format())やファイルパスへ
@@ -49,6 +50,35 @@ class FilterRule(BaseModel):
 
     port: int = Field(ge=1, le=65535)
     protocol: Literal["tcp", "udp"]
+
+
+class EgressRule(BaseModel):
+    """egress(VM から外向きの通信)ルール1件。
+
+    egress はリストの記述順に評価し、どれにも当たらなければ drop する。cidr は宛先の
+    IPv4 ネットワークで、ホストビットが立った値(192.168.122.1/24 など)は意図が
+    曖昧なため拒否する(単一ホストは /32 か接頭辞長の省略で書く)。port は宛先ポートで、
+    protocol が tcp / udp のときだけ指定できる。
+    """
+
+    action: Literal["accept", "drop"] = "accept"
+    cidr: ipaddress.IPv4Network
+    protocol: Literal["tcp", "udp", "all"] = "all"
+    port: int | None = Field(default=None, ge=1, le=65535)
+
+    @field_serializer("cidr")
+    def _serialize_cidr(self, value: ipaddress.IPv4Network) -> str:
+        """metadata永続化(yaml.safe_dump)向けに文字列化する。"""
+        return str(value)
+
+    @model_validator(mode="after")
+    def _validate_port_protocol(self) -> EgressRule:
+        """Port は tcp / udp のときだけ許す(all にはポートの概念が無いため)。"""
+        if self.port is not None and self.protocol == "all":
+            raise ValueError(
+                "egress の port は protocol が tcp / udp のときだけ指定できます"
+            )
+        return self
 
 
 class StaticRoute(BaseModel):
@@ -124,6 +154,10 @@ class ServerSpecInput(BaseModel):
     )
     # None: フィルタ無し(全許可)。[]: 意図的な全 inbound 拒否。
     filters: list[FilterRule] | None = None
+    # None: 外向き全許可(従来どおり)。リスト: 記述順に評価し、最後に既定 drop。
+    # []: 意図的な全 outbound 拒否(DHCP と、inbound で受けた接続への戻りは除く)。
+    # 件数の上限は nwfilter の priority の幅から決まる(config.EGRESS_MAX_RULES)。
+    egress: list[EgressRule] | None = Field(default=None, max_length=EGRESS_MAX_RULES)
     # ゲストに注入するスタティックルート。空リストなら追加ルート無し。
     static_routes: list[StaticRoute] = Field(default_factory=list)
     # 初回起動時に適用する cloud-init テンプレート名。非秘匿のため metadata への

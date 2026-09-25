@@ -62,6 +62,17 @@ GUEST_AGENT_CHANNEL = "org.qemu.guest_agent.0"
 # ネットワーク(macOS)で SSH のポート転送を指定するのに使う。
 QEMU_XML_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 
+# nwfilter のルール priority。nwfilter は記述順ではなく priority 昇順で評価する
+# (同じ priority 同士の順序は保証しない)。既定 drop を最後に置くため、他のルールは
+# すべてこれより小さくする。
+NWFILTER_DEFAULT_PRIORITY = 500
+NWFILTER_DROP_PRIORITY = 1000
+# egress ルールには記述順に NWFILTER_EGRESS_PRIORITY_START から 1 ずつ増える priority を
+# 振る。戻り通信・DHCP・inbound の accept(500)より後、既定 drop(1000)より前に収まる
+# ようにするため、egress ルールの件数には上限がある(spec.py で検証する)。
+NWFILTER_EGRESS_PRIORITY_START = NWFILTER_DEFAULT_PRIORITY + 1
+EGRESS_MAX_RULES = NWFILTER_DROP_PRIORITY - NWFILTER_EGRESS_PRIORITY_START
+
 # 宣言ポート1件分の accept ルール。protocol("tcp"/"udp")に応じてタグ名を差し替える。
 NWFILTER_PORT_RULE_TEMPLATE = """\
   <rule action='accept' direction='in' priority='500'>
@@ -69,9 +80,72 @@ NWFILTER_PORT_RULE_TEMPLATE = """\
   </rule>
 """
 
+# inbound の既定 drop(filters がリストのとき)。
+NWFILTER_INBOUND_DROP_RULE = """\
+  <rule action='drop' direction='in' priority='1000'>
+    <all/>
+  </rule>
+"""
+
+# inbound の全許可(filters が None で egress だけを絞るとき)。libvirt は state 属性の
+# 無い iptables 層の drop ルールを逆方向にも展開するため、下の out 方向の既定 drop は
+# VM 宛ての通信にも効く。inbound を全許可のまま保つには、これを明示する必要がある。
+NWFILTER_INBOUND_ACCEPT_ALL_RULE = """\
+  <rule action='accept' direction='in' priority='500'>
+    <all/>
+  </rule>
+"""
+
+# outbound の全許可(egress が None のとき。従来の挙動)。
+NWFILTER_OUTBOUND_ACCEPT_ALL_RULE = """\
+  <rule action='accept' direction='out' priority='500'>
+    <all/>
+  </rule>
+"""
+
+# egress を絞るときに egress ルールより前(小さい priority)に常に入るルール。
+# - ESTABLISHED,RELATED の out accept: inbound で受けた接続への戻りを通す。
+#   egress ルールより小さい priority に置き、戻りパケットが egress の drop に
+#   落ちないようにする。
+# - DHCP の out accept: allow-dhcp は 0.0.0.0 → 255.255.255.255 の初回取得しか
+#   許さず、リース更新(クライアント IP からサーバへのユニキャスト)は既定 drop に
+#   落ちるため、ポートだけで明示的に許可する。
+NWFILTER_EGRESS_HEAD_RULES = """\
+  <rule action='accept' direction='out' priority='500'>
+    <all state='ESTABLISHED,RELATED'/>
+  </rule>
+  <rule action='accept' direction='out' priority='500'>
+    <udp srcportstart='68' dstportstart='67'/>
+  </rule>
+"""
+
+# egress を絞るときに egress ルールより後(既定 drop)に常に入るルール。
+# - IPv6 の送信 drop(ebtables 層): egress ルールは IPv4 しか表せないため、IPv6 を
+#   通すと link-local 経由でホストや同じブリッジ上の VM へ抜けられる。
+# - out 方向の既定 drop。
+NWFILTER_EGRESS_TAIL_RULES = """\
+  <rule action='drop' direction='out' priority='1000'>
+    <mac protocolid='ipv6'/>
+  </rule>
+  <rule action='drop' direction='out' priority='1000'>
+    <all/>
+  </rule>
+"""
+
+# egress ルール1件。state='NEW' を明示するのは、新しい接続の最初のパケットだけを
+# このルールで判定するため(確立後は上の ESTABLISHED,RELATED で通る)。state を
+# 明示すると libvirt は逆方向(VM 宛て)のルールを作らないため、egress ルールが
+# inbound に影響しない。attrs は dstipaddr/dstipmask/dstportstart。
+NWFILTER_EGRESS_RULE_TEMPLATE = """\
+  <rule action='{action}' direction='out' priority='{priority}'>
+    <{protocol} state='NEW'{attrs}/>
+  </rule>
+"""
+
 # ESTABLISHED,RELATED の accept が無いと、VM 自身が発信した通信(DNS/apt 等)への
 # 応答まで default drop に落ちる。nwfilter は記述順ではなく priority 昇順で評価される
-# ため、default drop には他より大きい priority を明示する必要がある。
+# ため、default drop には他より大きい priority を明示する必要がある。rules には
+# inbound(filters)と egress の両方から組み立てたルールが入る。
 NWFILTER_XML_TEMPLATE = """
 <filter name='{name}' chain='root'>
   <filterref filter='allow-arp'/>
@@ -79,13 +153,7 @@ NWFILTER_XML_TEMPLATE = """
   <rule action='accept' direction='in' priority='500'>
     <all state='ESTABLISHED,RELATED'/>
   </rule>
-{port_rules}\
-  <rule action='accept' direction='out' priority='500'>
-    <all/>
-  </rule>
-  <rule action='drop' direction='in' priority='1000'>
-    <all/>
-  </rule>
+{rules}\
 </filter>
 """
 

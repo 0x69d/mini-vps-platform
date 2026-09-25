@@ -23,11 +23,14 @@ from mini_vps.resources import (
     build_seed_iso_bytes,
     create_overlay_volume,
     ensure_pool,
+    live_filterref_updates,
+    needs_nwfilter,
     render_seed_files,
     resize_domain_xml,
     set_domain_filterref_xml,
     ssh_forward_port,
 )
+from mini_vps.spec import ServerSpec
 from mini_vps.startup_scripts import StartupScriptError
 
 POOL_XML = "<pool type='dir'><name>vps-pool</name></pool>"
@@ -865,3 +868,239 @@ def test_build_seed_iso_fails_before_touching_pool_on_missing_secret(monkeypatch
         build_seed_iso(conn, spec, "k", secrets=None)
 
     pool.createXML.assert_not_called()
+
+
+# --- needs_nwfilter ---
+
+
+@pytest.mark.parametrize(
+    ("filters", "egress", "expected"),
+    [
+        (None, None, False),
+        ([], None, True),
+        (None, [], True),
+        ([{"port": 22, "protocol": "tcp"}], None, True),
+        (None, [{"cidr": "0.0.0.0/0"}], True),
+    ],
+)
+def test_needs_nwfilter(filters, egress, expected):
+    assert needs_nwfilter(_spec(filters=filters, egress=egress)) is expected
+
+
+def test_needs_nwfilter_treats_missing_keys_as_none():
+    # egress 追加前の metadata(キー自体が無い)でも判定できる
+    assert needs_nwfilter({"name": "web-1"}) is False
+
+
+# --- build_nwfilter_xml(egress) ---
+
+
+def _rules(xml):
+    """Nwfilter XML の <rule> を (action, direction, priority, 子要素) の列にする。"""
+    root = ET.fromstring(xml)
+    return [
+        (
+            rule.get("action"),
+            rule.get("direction"),
+            int(rule.get("priority")),
+            rule[0].tag,
+            dict(rule[0].attrib),
+        )
+        for rule in root.findall("rule")
+    ]
+
+
+def _egress_spec(egress, filters=None):
+    return _spec(filters=filters, egress=egress)
+
+
+def test_build_nwfilter_xml_without_egress_allows_all_outbound():
+    rules = _rules(build_nwfilter_xml(_spec(filters=[])))
+    assert ("accept", "out", 500, "all", {}) in rules
+    assert not [r for r in rules if r[0] == "drop" and r[1] == "out"]
+
+
+def test_build_nwfilter_xml_orders_egress_rules_by_increasing_priority():
+    egress = [
+        {"action": "accept", "cidr": "192.168.122.1/32", "protocol": "udp", "port": 53},
+        {"action": "drop", "cidr": "10.0.0.0/8", "protocol": "all", "port": None},
+        {"action": "accept", "cidr": "0.0.0.0/0", "protocol": "all", "port": None},
+    ]
+    rules = _rules(build_nwfilter_xml(_egress_spec(egress)))
+    egress_rules = [r for r in rules if r[1] == "out" and 500 < r[2] < 1000]
+
+    assert egress_rules == [
+        (
+            "accept",
+            "out",
+            501,
+            "udp",
+            {
+                "state": "NEW",
+                "dstipaddr": "192.168.122.1",
+                "dstipmask": "32",
+                "dstportstart": "53",
+            },
+        ),
+        (
+            "drop",
+            "out",
+            502,
+            "all",
+            {"state": "NEW", "dstipaddr": "10.0.0.0", "dstipmask": "8"},
+        ),
+        # 0.0.0.0/0 は宛先属性を省いて全宛先に一致させる
+        ("accept", "out", 503, "all", {"state": "NEW"}),
+    ]
+
+
+def test_build_nwfilter_xml_egress_keeps_return_traffic_and_dhcp_before_rules():
+    rules = _rules(build_nwfilter_xml(_egress_spec([{"cidr": "1.1.1.1/32"}])))
+    established = ("accept", "out", 500, "all", {"state": "ESTABLISHED,RELATED"})
+    dhcp = (
+        "accept",
+        "out",
+        500,
+        "udp",
+        {"srcportstart": "68", "dstportstart": "67"},
+    )
+    assert established in rules
+    assert dhcp in rules
+    egress_priorities = [r[2] for r in rules if r[4].get("state") == "NEW"]
+    assert all(500 < p < 1000 for p in egress_priorities)
+    # ARP と DHCP の初回取得は libvirt 同梱の filter で維持する
+    refs = [
+        f.get("filter")
+        for f in ET.fromstring(build_nwfilter_xml(_egress_spec([]))).findall(
+            "filterref"
+        )
+    ]
+    assert refs == ["allow-arp", "allow-dhcp"]
+
+
+def test_build_nwfilter_xml_egress_ends_with_default_drop_and_ipv6_drop():
+    rules = _rules(build_nwfilter_xml(_egress_spec([{"cidr": "0.0.0.0/0"}])))
+    assert ("drop", "out", 1000, "all", {}) in rules
+    assert ("drop", "out", 1000, "mac", {"protocolid": "ipv6"}) in rules
+    # 全許可の out accept は egress 指定時には入らない
+    assert ("accept", "out", 500, "all", {}) not in rules
+
+
+def test_build_nwfilter_xml_egress_only_allows_all_inbound():
+    rules = _rules(build_nwfilter_xml(_egress_spec([])))
+    assert ("accept", "in", 500, "all", {}) in rules
+    assert not [r for r in rules if r[0] == "drop" and r[1] == "in"]
+
+
+def test_build_nwfilter_xml_empty_egress_has_no_egress_rules():
+    rules = _rules(build_nwfilter_xml(_egress_spec([])))
+    assert not [r for r in rules if r[4].get("state") == "NEW"]
+    assert ("drop", "out", 1000, "all", {}) in rules
+
+
+def test_build_nwfilter_xml_combines_filters_and_egress():
+    rules = _rules(
+        build_nwfilter_xml(
+            _egress_spec(
+                [{"cidr": "1.1.1.1/32", "protocol": "tcp", "port": 443}],
+                filters=[{"port": 22, "protocol": "tcp"}],
+            )
+        )
+    )
+    assert ("accept", "in", 500, "tcp", {"dstportstart": "22"}) in rules
+    assert ("drop", "in", 1000, "all", {}) in rules
+    assert ("accept", "in", 500, "all", {}) not in rules
+    assert ("drop", "out", 1000, "all", {}) in rules
+
+
+def test_build_nwfilter_xml_accepts_validated_spec_dump():
+    spec = ServerSpec(
+        name="web-1",
+        memory=1024,
+        vcpus=1,
+        base_image="ubuntu-24.04.img",
+        disk=10,
+        egress=[{"cidr": "192.168.122.1", "protocol": "udp", "port": 53}],
+    ).model_dump()
+    rules = _rules(build_nwfilter_xml(spec))
+    assert (
+        "accept",
+        "out",
+        501,
+        "udp",
+        {
+            "state": "NEW",
+            "dstipaddr": "192.168.122.1",
+            "dstipmask": "32",
+            "dstportstart": "53",
+        },
+    ) in rules
+
+
+# --- live_filterref_updates ---
+
+_LIVE_DOMAIN_XML = """
+<domain type='kvm' id='3'>
+  <name>web-1</name>
+  <devices>
+    <interface type='network'>
+      <mac address='52:54:00:aa:bb:01'/>
+      <source network='default' portid='1111' bridge='virbr0'/>
+      <target dev='vnet3'/>
+      <model type='virtio'/>
+      {filterref0}
+      <alias name='net0'/>
+    </interface>
+    <interface type='network'>
+      <mac address='52:54:00:aa:bb:02'/>
+      <source network='seg1' portid='2222' bridge='virbr-seg1'/>
+      <target dev='vnet4'/>
+      <model type='virtio'/>
+      {filterref1}
+      <alias name='net1'/>
+    </interface>
+  </devices>
+</domain>
+"""
+
+
+def _live_xml(filterref0="", filterref1=""):
+    return _LIVE_DOMAIN_XML.format(filterref0=filterref0, filterref1=filterref1)
+
+
+def test_live_filterref_updates_attaches_to_every_interface():
+    updates = live_filterref_updates(_live_xml(), "minivps-web-1")
+
+    assert len(updates) == 2
+    for update, mac, dev in zip(
+        updates, ["52:54:00:aa:bb:01", "52:54:00:aa:bb:02"], ["vnet3", "vnet4"]
+    ):
+        iface = ET.fromstring(update)
+        assert iface.tag == "interface"
+        assert iface.find("filterref").get("filter") == "minivps-web-1"
+        # live の識別情報は往復させる(filterref 以外を変えない)
+        assert iface.find("mac").get("address") == mac
+        assert iface.find("target").get("dev") == dev
+        assert iface.find("alias") is not None
+
+
+def test_live_filterref_updates_detaches():
+    ref = "<filterref filter='minivps-web-1'/>"
+    updates = live_filterref_updates(_live_xml(ref, ref), None)
+
+    assert len(updates) == 2
+    assert all(ET.fromstring(u).find("filterref") is None for u in updates)
+
+
+def test_live_filterref_updates_skips_interfaces_already_converged():
+    # 1枚目だけ付け替え済みの状態(途中で失敗した後の再実行)
+    updates = live_filterref_updates(
+        _live_xml("<filterref filter='minivps-web-1'/>"), "minivps-web-1"
+    )
+
+    assert len(updates) == 1
+    assert ET.fromstring(updates[0]).find("mac").get("address") == "52:54:00:aa:bb:02"
+
+
+def test_live_filterref_updates_is_empty_when_nothing_to_change():
+    assert live_filterref_updates(_live_xml(), None) == []
