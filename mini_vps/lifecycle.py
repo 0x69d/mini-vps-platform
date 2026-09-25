@@ -17,6 +17,7 @@ from .resources import (
     create_overlay_volume,
     ssh_forward_port,
 )
+from .snapshots import is_snapshot_file
 from .spec import read_pubkey
 
 _LOGGER = logging.getLogger(__name__)
@@ -126,6 +127,8 @@ def teardown(conn, spec) -> None:
     """VM を後始末する(spec は name キーのみ参照する)。
 
     destroy → undefine → nwfilter 削除 → overlay volume 削除 → seed ISO 削除の順。
+    overlay volume には `{name}.qcow2` のほか、スナップショットの overlay
+    `{name}.snap-*.qcow2`(snapshots.py)も含む。
     """
     name = spec["name"]
 
@@ -136,8 +139,13 @@ def teardown(conn, spec) -> None:
             dom.destroy()
         # UEFI ドメインは per-VM の nvram ファイルを持つため、フラグ無しの undefine()
         # だと失敗する。このフラグは nvram の無い(legacy BIOS の)ドメインに対しては
-        # no-op なので、既存ドメインとの後方互換は保たれる。
-        dom.undefineFlags(libvirt.VIR_DOMAIN_UNDEFINE_NVRAM)
+        # no-op なので、既存ドメインとの後方互換は保たれる。スナップショットの
+        # メタデータが残っている domain も、SNAPSHOTS_METADATA が無いと undefine に
+        # 失敗する(スナップショットが無ければ no-op)。
+        dom.undefineFlags(
+            libvirt.VIR_DOMAIN_UNDEFINE_NVRAM
+            | libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA
+        )
         _LOGGER.info("%s: domain を undefine", name)
 
     # nwfilter は使用中(domain にアタッチ中)は undefine できないため、domain の
@@ -150,11 +158,17 @@ def teardown(conn, spec) -> None:
         conn.nwfilterLookupByName(filter_name).undefine()
         _LOGGER.info("%s: nwfilter %s を削除", name, filter_name)
 
-    # overlay volume
-    vol_name = f"{name}.qcow2"
+    # overlay volume(スナップショットの overlay を含む)。スナップショットの overlay は
+    # libvirt がプールの API を通さずに作るため、refresh してから一覧を取る。
     if POOL_NAME in {p.name() for p in conn.listAllStoragePools()}:
         pool = conn.storagePoolLookupByName(POOL_NAME)
-        if vol_name in {v.name() for v in pool.listAllVolumes()}:
+        pool.refresh(0)
+        vol_names = sorted(
+            v.name()
+            for v in pool.listAllVolumes()
+            if v.name() == f"{name}.qcow2" or is_snapshot_file(name, v.name())
+        )
+        for vol_name in vol_names:
             pool.storageVolLookupByName(vol_name).delete(0)
             _LOGGER.info("%s: overlay volume %s を削除", name, vol_name)
 

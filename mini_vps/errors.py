@@ -54,6 +54,14 @@ class PlatformUnsupported(MiniVpsError):
     """
 
 
+class SnapshotNotFound(MiniVpsError):
+    """指定した VM に、指定した名前のスナップショットが存在しないことを表す。
+
+    VM 自体が無い場合は ServerNotFound を使い、こちらは VM が存在する前提で
+    スナップショットだけが見つからない場合に限る。
+    """
+
+
 @dataclasses.dataclass(frozen=True)
 class ErrorMapping:
     """例外1種類分の正規化先。
@@ -77,6 +85,7 @@ ERROR_TABLE: dict[type[Exception], ErrorMapping] = {
     ServerRunning: ErrorMapping(409, 6, "server running"),
     # 7 は libvirtError(ホスト側の障害 / 503)。libvirt は入口層でだけ扱う。
     PlatformUnsupported: ErrorMapping(422, 8, "platform unsupported"),
+    SnapshotNotFound: ErrorMapping(404, 10, "snapshot not found"),
 }
 
 

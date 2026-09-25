@@ -323,7 +323,11 @@ def test_teardown_destroys_and_undefines_active_domain():
     teardown(conn, {"name": "web-1"})
 
     dom.destroy.assert_called_once()
-    dom.undefineFlags.assert_called_once_with(libvirt.VIR_DOMAIN_UNDEFINE_NVRAM)
+    # スナップショットのメタデータが残っていても undefine できるようにする。
+    dom.undefineFlags.assert_called_once_with(
+        libvirt.VIR_DOMAIN_UNDEFINE_NVRAM
+        | libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA
+    )
 
 
 def test_teardown_skips_domain_when_absent():
@@ -368,6 +372,41 @@ def test_teardown_deletes_overlay_volume_when_present():
 
     pool.storageVolLookupByName.assert_called_once_with("web-1.qcow2")
     pool.storageVolLookupByName.return_value.delete.assert_called_once_with(0)
+
+
+def test_teardown_deletes_snapshot_overlays_after_refresh():
+    conn = MagicMock()
+    conn.listAllDomains.return_value = []
+    conn.listAllNWFilters.return_value = []
+    pool_entry = MagicMock()
+    pool_entry.name.return_value = POOL_NAME
+    conn.listAllStoragePools.return_value = [pool_entry]
+    pool = MagicMock()
+    conn.storagePoolLookupByName.return_value = pool
+    vols = []
+    for vol_name in (
+        "web-1.qcow2",
+        "web-1.snap-a.qcow2",
+        "web-1.snap-b.qcow2",
+        # 名前の接頭辞が似ている別の VM のファイルは消さない。
+        "web-10.qcow2",
+        "web-10.snap-a.qcow2",
+    ):
+        vol = MagicMock()
+        vol.name.return_value = vol_name
+        vols.append(vol)
+    pool.listAllVolumes.return_value = vols
+
+    teardown(conn, {"name": "web-1"})
+
+    # スナップショットの overlay は libvirt がプールの API を通さずに作るため、
+    # 一覧を取る前に refresh する。
+    pool.refresh.assert_called_once_with(0)
+    assert [c.args[0] for c in pool.storageVolLookupByName.call_args_list] == [
+        "web-1.qcow2",
+        "web-1.snap-a.qcow2",
+        "web-1.snap-b.qcow2",
+    ]
 
 
 def test_teardown_deletes_seed_volume_when_present():
