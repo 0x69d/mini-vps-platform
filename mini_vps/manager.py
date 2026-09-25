@@ -12,14 +12,18 @@ import libvirt
 import yaml
 
 from . import dns_registration
+from . import doctor as doctor_module
+from .admission import check_capacity, needs_recheck
 from .config import METADATA_KEY, METADATA_NS
 from .errors import (  # noqa: F401  (manager から import する既存コード向けの再エクスポート)
+    InsufficientCapacity,
     PlatformUnsupported,
     ServerConflict,
     ServerNotFound,
     ServerNotRunning,
     ServerRunning,
 )
+from .images import list_images
 from .lifecycle import _lease_ipv4, ensure_network_active, provision, teardown
 from .locks import NameLocks
 from .planning import Action, check_platform, plan_change
@@ -245,6 +249,8 @@ class ServerManager:
             ServerConflict: 不変フィールドの差分、または管理対象外の同名 domain の場合。
             ServerRunning: 停止中にしか反映できない差分があり、対象 VM が起動中の場合。
             PlatformUnsupported: このホストで実現できない機能が指定された場合。
+            InsufficientCapacity: 新規作成、または memory/vcpus を増やす収束に
+                ホストの容量が足りない場合(admission.py 参照)。
         """
         name = spec["name"]
         check_platform(spec, get_profile())
@@ -252,6 +258,8 @@ class ServerManager:
             existing = _find_domain(self.conn, name)
             if existing is None:
                 _LOGGER.info("%s: 新規作成を開始", name)
+                # 容量チェックは何も作る前(=巻き戻し不要な位置)で、ロックの内側で行う。
+                check_capacity(self.conn, spec, self.managed_specs)
                 try:
                     dom = provision(self.conn, spec, secrets=secrets)
                     _write_spec(dom, spec)
@@ -288,6 +296,9 @@ class ServerManager:
                     f"{sorted(change.offline_keys)})"
                 )
 
+            if change.diff_keys & {"memory", "vcpus"} and needs_recheck(old_spec, spec):
+                # 自分自身の現在の割当は evaluate が name で除くため二重計上しない。
+                check_capacity(self.conn, spec, self.managed_specs, include_disk=False)
             _LOGGER.info("%s: 差分を収束 fields=%s", name, sorted(change.diff_keys))
             dom = self._converge(existing, old_spec, spec, set(change.diff_keys))
             # _write_spec が失敗しても domain 実体側はロールバックしない。_converge の
@@ -367,6 +378,55 @@ class ServerManager:
             minivps 名前空間の metadata を持つ domain 名のリスト。
         """
         return [dom.name() for dom in self.conn.listAllDomains() if _is_managed(dom)]
+
+    def managed_specs(self) -> dict[str, dict]:
+        """管理対象 VM の name → spec(metadata の値)を返す。
+
+        容量チェック・image list・doctor が「どの VM が何をどれだけ使っているか」を
+        数えるための読み取り系。ロックは取らない(create() がロック内で呼ぶため)。
+        列挙の後に消えた domain は飛ばす。
+
+        Returns:
+            VM 名 → spec の dict。
+        """
+        specs = {}
+        for dom in self.conn.listAllDomains():
+            try:
+                if _is_managed(dom):
+                    specs[dom.name()] = _read_spec(dom)
+            except libvirt.libvirtError as e:
+                if e.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
+                    raise
+        return specs
+
+    def images(self) -> list[dict]:
+        """Base image の一覧(サイズ・フォーマット・参照している管理 VM)を返す。
+
+        Returns:
+            images.image_entry() の dict のリスト(名前順)。
+        """
+        return list_images(self.conn, self.managed_specs())
+
+    def doctor(self) -> list[dict]:
+        """ホストの前提と孤児リソースを検査する(読み取りのみ)。
+
+        Returns:
+            {level, check, detail} のリスト(doctor.run_checks 参照)。
+        """
+        return doctor_module.run_checks(self)
+
+    def gc(self, apply: bool = False) -> dict:
+        """孤児リソースを回収する(既定は dry-run)。
+
+        孤児ごとに name 単位ロックを取ってから再判定して消す(doctor.gc 参照)。
+
+        Args:
+            apply: True なら実際に消す。False なら消す予定を返すだけ。
+
+        Returns:
+            applied・orphans・removed・skipped を持つ dict。
+        """
+        return doctor_module.gc(self, apply=apply)
 
     def is_managed(self, dom) -> bool:
         """指定した domain が管理対象かを判定する。

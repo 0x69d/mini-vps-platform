@@ -54,6 +54,14 @@ class PlatformUnsupported(MiniVpsError):
     """
 
 
+class InsufficientCapacity(MiniVpsError):
+    """ホストの容量(メモリ・vCPU・ディスク)が足りず、VM を作成・拡張できないことを表す。
+
+    作成してから OOM やディスク枯渇で落ちるより前に、約束しすぎない形で拒否する。
+    判定の式と設定は admission.py と docs/operations.md を参照。
+    """
+
+
 @dataclasses.dataclass(frozen=True)
 class ErrorMapping:
     """例外1種類分の正規化先。
@@ -77,6 +85,7 @@ ERROR_TABLE: dict[type[Exception], ErrorMapping] = {
     ServerRunning: ErrorMapping(409, 6, "server running"),
     # 7 は libvirtError(ホスト側の障害 / 503)。libvirt は入口層でだけ扱う。
     PlatformUnsupported: ErrorMapping(422, 8, "platform unsupported"),
+    InsufficientCapacity: ErrorMapping(507, 11, "insufficient capacity"),
 }
 
 

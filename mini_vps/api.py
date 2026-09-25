@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import errors
+from .doctor import has_error
 from .logging_config import configure as configure_logging
 from .manager import ServerManager, register_quiet_error_handler
 from .platform_profile import get_profile
@@ -119,6 +120,41 @@ async def _libvirt_error_handler(
 def list_servers(mgr: ServerManager = Depends(get_manager)) -> dict:
     """管理対象の VM 名一覧を返す。"""
     return {"servers": mgr.list()}
+
+
+@app.get("/images")
+def list_images(mgr: ServerManager = Depends(get_manager)) -> dict:
+    """Base image の一覧(サイズ・フォーマット・参照している管理 VM)を返す。"""
+    return {"images": mgr.images()}
+
+
+@app.get("/doctor")
+def get_doctor(mgr: ServerManager = Depends(get_manager)) -> dict:
+    """ホストの前提と孤児リソースを検査する。
+
+    検査自体が成功すれば error を含んでいても 200 を返し、ok で全体の可否を示す
+    (ok は error が1件も無ければ true)。
+    """
+    checks = mgr.doctor()
+    return {"ok": not has_error(checks), "checks": checks}
+
+
+class GcRequest(BaseModel):
+    """POST /gc の任意 body。"""
+
+    apply: bool = False
+
+
+@app.post("/gc")
+def post_gc(
+    body: GcRequest | None = None, mgr: ServerManager = Depends(get_manager)
+) -> dict:
+    """孤児リソースを回収する。
+
+    既定(body 無し、または apply=false)は dry-run で、消す予定を返すだけ。
+    apply=true のときは孤児ごとに name 単位ロックを取って再判定してから消す。
+    """
+    return mgr.gc(apply=body.apply if body else False)
 
 
 @app.get("/servers/{name}")

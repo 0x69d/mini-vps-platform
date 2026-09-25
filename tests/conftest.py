@@ -39,6 +39,18 @@ def _isolate_dns_registration_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _skip_capacity_check(monkeypatch):
+    """ServerManager.create() の容量チェックを全テストで素通しにする。
+
+    create() のテストの多くは素の MagicMock を libvirt 接続に使うため、実物の
+    admission.check_capacity を通すと getInfo() などの戻り値が数値にならず判定が
+    意味を持たない。容量チェックとの結合を検証するテストは、
+    `monkeypatch.setattr("mini_vps.manager.check_capacity", ...)` で差し戻す。
+    """
+    monkeypatch.setattr("mini_vps.manager.check_capacity", lambda *a, **k: None)
+
+
 def make_libvirt_error(code):
     """指定したエラーコードを持つ libvirt.libvirtError を作る。
 
