@@ -1,0 +1,15 @@
+# macOS で最初に作る VM の spec(docs/macos.md の「最初の VM」)。
+#
+#   uv run mini-vps create examples/macos-quickstart.yaml
+#
+# macOS は QEMU の user-mode ネットワークのみ対応のため、networks は [default] だけ。
+# filters / egress / static_routes / 静的 IP は Linux ホスト専用で、指定すると
+# PlatformUnsupported で拒否される。
+# base_image は scripts/macos-setup.sh がアーキテクチャに合わせて取得する
+# Ubuntu 24.04 の cloud image(Apple Silicon は arm64 版)。
+name: quickstart
+memory: 2048
+vcpus: 2
+base_image: ubuntu-24.04.img
+disk: 10
+networks: [default]
