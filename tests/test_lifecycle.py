@@ -72,7 +72,9 @@ def stub_provision_deps(monkeypatch):
     # 検査したいものだけを各テストで上書きする。返すのは build_domain_xml のモック。
     monkeypatch.setattr("mini_vps.lifecycle.ensure_network_active", MagicMock())
     monkeypatch.setattr("mini_vps.lifecycle.read_pubkey", lambda: "ssh-ed25519 AAAA")
-    monkeypatch.setattr("mini_vps.lifecycle.build_nwfilter_xml", lambda s: "<filter/>")
+    monkeypatch.setattr(
+        "mini_vps.resources.build_nwfilter_xml", lambda s, uuid=None: "<filter/>"
+    )
     monkeypatch.setattr("mini_vps.lifecycle._filter_name", lambda s: "minivps-web-1")
     monkeypatch.setattr(
         "mini_vps.lifecycle.create_overlay_volume", lambda c, s: "/overlay.qcow2"

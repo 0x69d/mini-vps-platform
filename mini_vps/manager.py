@@ -32,9 +32,9 @@ from .platform_profile import get_profile
 from .resources import (
     _filter_name,
     _mac_for_interface,
-    build_nwfilter_xml,
     build_seed_iso,
     create_overlay_volume,
+    define_nwfilter,
     live_filterref_updates,
     needs_nwfilter,
     resize_domain_xml,
@@ -412,7 +412,7 @@ class ServerManager:
 
         # 同名での再定義は、この filter を参照する稼働中の VM にも libvirt が反映する。
         if filter_changed and new_has_filter:
-            self.conn.nwfilterDefineXML(build_nwfilter_xml(new_spec))
+            define_nwfilter(self.conn, new_spec)
             _LOGGER.debug("nwfilter %s を定義", filter_name)
 
         if diff_keys & {"memory", "vcpus"} or attach_changed:

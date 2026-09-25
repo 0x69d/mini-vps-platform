@@ -22,6 +22,7 @@ from mini_vps.resources import (
     build_seed_iso,
     build_seed_iso_bytes,
     create_overlay_volume,
+    define_nwfilter,
     ensure_pool,
     live_filterref_updates,
     needs_nwfilter,
@@ -1104,3 +1105,32 @@ def test_live_filterref_updates_skips_interfaces_already_converged():
 
 def test_live_filterref_updates_is_empty_when_nothing_to_change():
     assert live_filterref_updates(_live_xml(), None) == []
+
+
+# --- define_nwfilter ---
+
+
+def test_define_nwfilter_defines_new_filter_without_uuid():
+    conn = MagicMock()
+    conn.listAllNWFilters.return_value = []
+
+    name = define_nwfilter(conn, _spec(filters=[]))
+
+    assert name == "minivps-web-1"
+    xml = conn.nwfilterDefineXML.call_args.args[0]
+    assert "<uuid>" not in xml
+
+
+def test_define_nwfilter_reuses_existing_uuid_on_redefine():
+    """UUID 無しで同名を再定義すると libvirt が拒否する(実機で確認)。"""
+    conn = MagicMock()
+    existing = MagicMock()
+    existing.name.return_value = "minivps-web-1"
+    conn.listAllNWFilters.return_value = [existing]
+    conn.nwfilterLookupByName.return_value.UUIDString.return_value = "1234-abcd"
+
+    define_nwfilter(conn, _spec(filters=[{"port": 22, "protocol": "tcp"}]))
+
+    root = ET.fromstring(conn.nwfilterDefineXML.call_args.args[0])
+    assert root.find("uuid").text == "1234-abcd"
+    assert root.get("name") == "minivps-web-1"

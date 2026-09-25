@@ -147,7 +147,7 @@ NWFILTER_EGRESS_RULE_TEMPLATE = """\
 # ため、default drop には他より大きい priority を明示する必要がある。rules には
 # inbound(filters)と egress の両方から組み立てたルールが入る。
 NWFILTER_XML_TEMPLATE = """
-<filter name='{name}' chain='root'>
+<filter name='{name}' chain='root'>{uuid}
   <filterref filter='allow-arp'/>
   <filterref filter='allow-dhcp'/>
   <rule action='accept' direction='in' priority='500'>

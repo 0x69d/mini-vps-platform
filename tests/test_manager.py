@@ -672,13 +672,13 @@ def test_create_converges_filters_none_to_list_defines_and_attaches_filter(
     monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
     monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
     nwfilter_xml_mock = MagicMock(return_value="<filter/>")
-    monkeypatch.setattr("mini_vps.manager.build_nwfilter_xml", nwfilter_xml_mock)
+    monkeypatch.setattr("mini_vps.resources.build_nwfilter_xml", nwfilter_xml_mock)
     set_filterref_mock = MagicMock(return_value="<domain filtered/>")
     monkeypatch.setattr("mini_vps.manager.set_domain_filterref_xml", set_filterref_mock)
 
     mgr.create(new_spec)
 
-    nwfilter_xml_mock.assert_called_once_with(new_spec)
+    nwfilter_xml_mock.assert_called_once_with(new_spec, uuid=None)
     conn.nwfilterDefineXML.assert_called_once_with("<filter/>")
     set_filterref_mock.assert_called_once_with("<domain/>", "minivps-web-1")
     conn.defineXML.assert_called_once_with("<domain filtered/>")
@@ -705,13 +705,13 @@ def test_create_converges_filters_none_to_empty_list_defines_deny_all_filter(
     monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
     monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
     nwfilter_xml_mock = MagicMock(return_value="<filter/>")
-    monkeypatch.setattr("mini_vps.manager.build_nwfilter_xml", nwfilter_xml_mock)
+    monkeypatch.setattr("mini_vps.resources.build_nwfilter_xml", nwfilter_xml_mock)
     set_filterref_mock = MagicMock(return_value="<domain filtered/>")
     monkeypatch.setattr("mini_vps.manager.set_domain_filterref_xml", set_filterref_mock)
 
     mgr.create(new_spec)
 
-    nwfilter_xml_mock.assert_called_once_with(new_spec)
+    nwfilter_xml_mock.assert_called_once_with(new_spec, uuid=None)
     conn.nwfilterDefineXML.assert_called_once_with("<filter/>")
     set_filterref_mock.assert_called_once_with("<domain/>", "minivps-web-1")
 
@@ -795,7 +795,7 @@ def test_create_converges_filters_list_to_list_redefines_without_undefining(
     monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
     monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
     nwfilter_xml_mock = MagicMock(return_value="<filter/>")
-    monkeypatch.setattr("mini_vps.manager.build_nwfilter_xml", nwfilter_xml_mock)
+    monkeypatch.setattr("mini_vps.resources.build_nwfilter_xml", nwfilter_xml_mock)
     monkeypatch.setattr(
         "mini_vps.manager.set_domain_filterref_xml",
         MagicMock(return_value="<domain refiltered/>"),
@@ -803,7 +803,7 @@ def test_create_converges_filters_list_to_list_redefines_without_undefining(
 
     mgr.create(new_spec)
 
-    nwfilter_xml_mock.assert_called_once_with(new_spec)
+    nwfilter_xml_mock.assert_called_once_with(new_spec, uuid=None)
     conn.nwfilterDefineXML.assert_called_once_with("<filter/>")
     conn.nwfilterLookupByName.assert_not_called()
 
@@ -823,7 +823,7 @@ def test_create_converges_filters_and_memory_together_in_single_definexml(
     monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
     monkeypatch.setattr("mini_vps.manager._write_spec", MagicMock())
     monkeypatch.setattr(
-        "mini_vps.manager.build_nwfilter_xml", MagicMock(return_value="<filter/>")
+        "mini_vps.resources.build_nwfilter_xml", MagicMock(return_value="<filter/>")
     )
     monkeypatch.setattr(
         "mini_vps.manager.resize_domain_xml",
@@ -1355,7 +1355,7 @@ def _converge_setup(monkeypatch, old_spec, running):
     monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
     monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
     monkeypatch.setattr(
-        "mini_vps.manager.build_nwfilter_xml", MagicMock(return_value="<filter/>")
+        "mini_vps.resources.build_nwfilter_xml", MagicMock(return_value="<filter/>")
     )
     mgr.get = MagicMock(return_value={"spec": {}, "status": {}})
     return conn, mgr, dom

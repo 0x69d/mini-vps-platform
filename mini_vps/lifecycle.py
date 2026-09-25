@@ -12,9 +12,9 @@ from .resources import (
     _network_name,
     allocate_ssh_port,
     build_domain_xml,
-    build_nwfilter_xml,
     build_seed_iso,
     create_overlay_volume,
+    define_nwfilter,
     needs_nwfilter,
     ssh_forward_port,
 )
@@ -55,8 +55,7 @@ def provision(conn, spec, secrets: dict[str, str] | None = None) -> libvirt.virD
 
     filter_name = None
     if needs_nwfilter(spec):
-        conn.nwfilterDefineXML(build_nwfilter_xml(spec))
-        filter_name = _filter_name(spec)
+        filter_name = define_nwfilter(conn, spec)
         _LOGGER.info("%s: nwfilter %s を定義", name, filter_name)
 
     seed_path = build_seed_iso(conn, spec, read_pubkey(), secrets=secrets)

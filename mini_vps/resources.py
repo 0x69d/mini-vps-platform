@@ -379,10 +379,11 @@ def _egress_rule_xml(rule: dict, priority: int) -> str:
     )
 
 
-def build_nwfilter_xml(spec) -> str:
+def build_nwfilter_xml(spec, uuid: str | None = None) -> str:
     """VM 専用の nwfilter XML を filters(inbound)と egress(outbound)から作る。
 
-    呼び出し側で needs_nwfilter(spec) を確認済みであることが前提。
+    呼び出し側で needs_nwfilter(spec) を確認済みであることが前提。uuid は既存の
+    同名 filter を再定義するときに渡す(define_nwfilter 参照)。
 
     inbound: filters がリストなら宣言ポートだけ accept して残りを drop、None なら
     全 accept。outbound: egress が None なら全 accept(従来どおり)、リストなら
@@ -415,7 +416,26 @@ def build_nwfilter_xml(spec) -> str:
     if filters is not None:
         rules += NWFILTER_INBOUND_DROP_RULE
 
-    return NWFILTER_XML_TEMPLATE.format(name=_filter_name(spec), rules=rules)
+    uuid_xml = f"\n  <uuid>{uuid}</uuid>" if uuid else ""
+    return NWFILTER_XML_TEMPLATE.format(
+        name=_filter_name(spec), uuid=uuid_xml, rules=rules
+    )
+
+
+def define_nwfilter(conn, spec) -> str:
+    """VM 専用の nwfilter を定義(既にあれば同じ UUID で再定義)し、名前を返す。
+
+    libvirt は UUID の無い定義を「新しい filter」とみなすため、同名の filter が既に
+    あると "already exists with uuid" で拒否する。既存の filter の UUID を引き継いで
+    再定義すれば、libvirt はその filter を更新し、参照している稼働中の VM の
+    インターフェースにも反映する。
+    """
+    name = _filter_name(spec)
+    uuid = None
+    if name in {f.name() for f in conn.listAllNWFilters()}:
+        uuid = conn.nwfilterLookupByName(name).UUIDString()
+    conn.nwfilterDefineXML(build_nwfilter_xml(spec, uuid=uuid))
+    return name
 
 
 def _sub(parent: ET.Element, tag: str, text: str | None = None, **attrs):
