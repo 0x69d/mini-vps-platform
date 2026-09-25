@@ -8,6 +8,8 @@ HTTP ステータスではなく終了コードへ正規化する点のみが ap
 import contextlib
 import functools
 import json
+import os
+import shlex
 import sys
 from typing import Annotated
 
@@ -17,6 +19,7 @@ import yaml
 from pydantic import ValidationError
 
 from . import errors
+from .guest_agent import STDIN_LIMIT_BYTES
 from .logging_config import configure as configure_logging
 from .manager import ServerManager, register_quiet_error_handler
 from .platform_profile import get_profile
@@ -218,6 +221,142 @@ def _cmd_restart(ctx: typer.Context, name: str, force: _ForceOption = False) -> 
     return ctx.obj.restart(name, force=force)
 
 
+# exec の --raw でタイムアウトしたときの終了コード(coreutils の timeout と同じ)。
+_EXEC_TIMEOUT_EXIT_CODE = 124
+
+
+def _exec_raw_exit_code(result: dict) -> int:
+    """`exec --raw` の終了コードを、ゲスト側の終了状態から決める(シェルの慣習)。"""
+    if result["timed_out"]:
+        return _EXEC_TIMEOUT_EXIT_CODE
+    if result["exit_code"] is not None:
+        return result["exit_code"]
+    if result["signal"] is not None:
+        return 128 + result["signal"]
+    return 1
+
+
+def _read_stdin_bytes() -> bytes:
+    """標準入力を上限+1バイトまで読む(上限超過の判定は guest_agent に任せる)。"""
+    return sys.stdin.buffer.read(STDIN_LIMIT_BYTES + 1)
+
+
+@_command(
+    "exec",
+    help="guest agent 経由で VM 内のコマンドを実行する(例: exec web-1 -- ls -la /)",
+)
+def _cmd_exec(
+    ctx: typer.Context,
+    name: str,
+    command: Annotated[
+        list[str],
+        typer.Argument(help="実行するコマンドと引数(- で始まる引数は -- の後に置く)"),
+    ],
+    raw: Annotated[
+        bool,
+        typer.Option(
+            "--raw",
+            help="stdout/stderr をそのまま流し、ゲスト側の終了コードで終了する",
+        ),
+    ] = False,
+    stdin: Annotated[
+        bool,
+        typer.Option("--stdin", help="このプロセスの標準入力をゲストのコマンドへ渡す"),
+    ] = False,
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", min=0.001, help="終了を待つ秒数"),
+    ] = 60,
+) -> dict | None:
+    """VM 内でコマンドを実行する(ServerManager.exec 参照)。
+
+    既定は他コマンドと同じく結果を JSON で出す。--raw はシェルやエージェントから
+    使うためのモードで、ゲストの stdout/stderr をそのまま書き出し、終了コードを
+    引き継ぐ(シグナル終了は 128+番号、タイムアウトは 124)。
+    """
+    data = _read_stdin_bytes() if stdin else None
+    result = ctx.obj.exec(name, command, stdin=data, timeout=timeout)
+    if not raw:
+        return result
+    sys.stdout.write(result["stdout"])
+    sys.stdout.flush()
+    sys.stderr.write(result["stderr"])
+    if result["truncated"]:
+        print("warning: output truncated", file=sys.stderr)
+    if result["timed_out"]:
+        print(
+            f"error: timed out; still running in guest (pid {result['pid']})",
+            file=sys.stderr,
+        )
+    sys.stderr.flush()
+    raise typer.Exit(code=_exec_raw_exit_code(result))
+
+
+def _ssh_argv(endpoint: dict, extra: list[str]) -> list[str]:
+    """ssh_endpoint の結果から ssh コマンドの argv を組み立てる。
+
+    IdentitiesOnly は、ssh-agent に鍵が多いと専用鍵を試す前に
+    "Too many authentication failures" で切られるのを避けるため。
+    """
+    return [
+        "ssh",
+        "-i",
+        endpoint["identity_file"],
+        "-p",
+        str(endpoint["port"]),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        f"{endpoint['user']}@{endpoint['host']}",
+        *extra,
+    ]
+
+
+@_command("ssh", help="VM へ SSH 接続する(-- の後は ssh への追加引数)")
+def _cmd_ssh(
+    ctx: typer.Context,
+    name: str,
+    extra: Annotated[
+        list[str] | None,
+        typer.Argument(help="ssh に渡す追加の引数(リモートで実行するコマンドなど)"),
+    ] = None,
+    print_only: Annotated[
+        bool,
+        typer.Option("--print", help="接続せず、実行する ssh コマンドを表示する"),
+    ] = False,
+) -> str | None:
+    """VM へ SSH 接続する。このプロセスを ssh に置き換える(os.execvp)。"""
+    argv = _ssh_argv(ctx.obj.ssh_endpoint(name), extra or [])
+    if print_only:
+        return shlex.join(argv)
+    os.execvp(argv[0], argv)
+    return None
+
+
+@_command("console", help="VM のシリアルコンソールに接続する(抜けるのは Ctrl+])")
+def _cmd_console(ctx: typer.Context, name: str) -> None:
+    """`virsh console` で VM のシリアルコンソールに接続する(os.execvp)。
+
+    存在しない・管理対象外の name は virsh に渡す前に ServerNotFound で拒否する。
+    """
+    ctx.obj.status(name)
+    argv = ["virsh", "-c", get_profile().libvirt_uri, "console", name]
+    os.execvp(argv[0], argv)
+
+
+@_command("pause", help="VM を一時停止する(vCPU を凍結。メモリは保持)")
+def _cmd_pause(ctx: typer.Context, name: str) -> dict:
+    """指定 VM を一時停止する(一時停止中なら冪等に no-op)。"""
+    return ctx.obj.pause(name)
+
+
+@_command("resume", help="一時停止中の VM を再開する")
+def _cmd_resume(ctx: typer.Context, name: str) -> dict:
+    """指定 VM を再開する(稼働中なら冪等に no-op)。"""
+    return ctx.obj.resume(name)
+
+
 @_command("delete", help="管理対象の VM を削除する")
 def _cmd_delete(ctx: typer.Context, name: str) -> str:
     """管理対象の VM を削除する。"""
@@ -268,6 +407,10 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
         - 6: ServerRunning(create が可変フィールド差分を起動中の VM に
           適用しようとした場合を含む)
         - 7: libvirtError(libvirtd 停止・接続不可など)
+        - 8: PlatformUnsupported
+        - 9: GuestAgentUnavailable
+
+        `exec --raw` はこれらに加えて、ゲスト側のコマンドの終了コードで終了する。
     """
     factory = manager_factory or _open_manager
     try:

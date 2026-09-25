@@ -11,9 +11,10 @@ import xml.etree.ElementTree as ET
 import libvirt
 import yaml
 
-from . import dns_registration
+from . import dns_registration, guest_agent
 from .config import METADATA_KEY, METADATA_NS
 from .errors import (  # noqa: F401  (manager から import する既存コード向けの再エクスポート)
+    GuestAgentUnavailable,
     PlatformUnsupported,
     ServerConflict,
     ServerNotFound,
@@ -26,13 +27,15 @@ from .planning import Action, check_platform, plan_change
 from .platform_profile import get_profile
 from .resources import (
     _filter_name,
+    _mac_for_interface,
     build_nwfilter_xml,
     build_seed_iso,
     create_overlay_volume,
     resize_domain_xml,
     set_domain_filterref_xml,
+    ssh_forward_port,
 )
-from .spec import ServerSpec, read_pubkey
+from .spec import ServerSpec, read_pubkey, ssh_identity_path
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -165,19 +168,48 @@ def _status_of(dom, spec: dict) -> dict:
 
     spec に静的アドレスを持つ NIC が1つでもあれば、起動状態に関わらず spec 由来の
     アドレスを優先表示する。cloud-init が実際に適用したかは確認せず、宣言値を
-    そのまま返す。無ければ従来通り起動中のときだけ DHCP リースを引く。
+    そのまま返す。無ければ従来通り起動中のときだけ DHCP リースを引き、リースも
+    無ければ guest agent が報告するアドレスを使う(agent が使えなければ None)。
     """
     state = dom.state()[0]
     ip = _static_ipv4(spec)
     if ip is None and state == libvirt.VIR_DOMAIN_RUNNING:
-        ip = _lease_ipv4(dom)
+        ip = _lease_ipv4(dom) or _agent_ipv4_or_none(dom, spec)
     return {"state": STATE_NAMES.get(state, "unknown"), "ip": ip}
+
+
+def _agent_ipv4_or_none(dom, spec: dict) -> str | None:
+    """Guest agent から IPv4 を引く。使えなければ None(例外は握りつぶす)。
+
+    DHCP リースが無い VM(user-mode ネットワークなど)の IP 表示のためのフォール
+    バック。agent が未導入・起動直後でも status/get を失敗させないよう、agent に
+    起因する例外と libvirt のエラーはすべて None として扱う。VM の NIC の MAC を
+    渡し、ゲスト内のブリッジ(docker0 など)のアドレスより優先させる。
+    """
+    name = dom.name()
+    nic_count = len(spec.get("networks") or ["default"])
+    macs = {_mac_for_interface(name, i) for i in range(nic_count)}
+    try:
+        return guest_agent.agent_ipv4(dom, macs)
+    except (GuestAgentUnavailable, ServerNotRunning, libvirt.libvirtError) as e:
+        _LOGGER.debug("%s: guest agent から IP を取得できない: %s", name, e)
+        return None
+
+
+def _require_running(dom, name: str) -> None:
+    """Domain が稼働中(一時停止していない)でなければ ServerNotRunning を送出する。"""
+    state = dom.state()[0]
+    if state == libvirt.VIR_DOMAIN_PAUSED:
+        raise ServerNotRunning(f"{name} (一時停止中。resume してください)")
+    if state != libvirt.VIR_DOMAIN_RUNNING:
+        raise ServerNotRunning(name)
 
 
 class ServerManager:
     """VM の作成・取得・一覧・削除を行う管理層。
 
-    書き込み系操作(create/delete/start/stop/restart/reinstall)は name 単位ロックで
+    書き込み系操作(create/delete/start/stop/restart/pause/resume/reinstall)は
+    name 単位ロックで
     直列化し、同名への並行収束(check-then-act)の TOCTOU を防ぐ。ロックは
     プロセス間(fcntl.flock)でも効くため、CLI と API が別プロセスでも直列化される
     (locks.py 参照)。
@@ -488,6 +520,160 @@ class ServerManager:
                 dom.reboot()
             _LOGGER.info("%s: 再起動を要求 force=%s", name, force)
             return self.get(name)
+
+    def exec(
+        self,
+        name: str,
+        argv: list[str],
+        stdin: bytes | str | None = None,
+        timeout: float = 60,
+    ) -> dict:
+        """稼働中の VM の中で、qemu-guest-agent 経由でコマンドを実行する。
+
+        ゲスト内 root 権限でのコマンド実行と同等で、SSH 鍵もネットワークも要らない
+        (docs/guest-agent.md 参照)。終了まで待って結果を返し、timeout を超えたら
+        timed_out=True を返す(プロセスはゲストで走り続ける。
+        guest_agent.exec_command 参照)。
+
+        ライフサイクルの書き込みではないため name ロックは取らない。取ると、長い
+        コマンドの実行中に同じ VM への stop/pause が待たされ、暴走したコマンドを
+        止める手段まで塞いでしまうため。実行中に VM が止まれば、次のポーリングで
+        ServerNotRunning になる。
+
+        ログには name・argv[0]・終了コードだけを出す。引数・stdin・出力は
+        secrets を含みうるため出さない。
+
+        Args:
+            name: VM 名。
+            argv: 実行するコマンドと引数(シェルを介さない)。
+            stdin: 標準入力へ渡すデータ。str は UTF-8 で符号化する。
+            timeout: 終了を待つ秒数。
+
+        Returns:
+            pid・exit_code・signal・stdout・stderr・truncated・timed_out を持つ dict。
+            stdout/stderr は UTF-8 として復号した文字列(不正なバイトは置換文字)。
+
+        Raises:
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+            ServerNotRunning: 対象 VM が停止中・一時停止中の場合。
+            GuestAgentUnavailable: guest agent を使えない場合。
+            GuestExecError: argv・stdin が不正、またはゲストでコマンドを
+                開始できない場合。
+        """
+        dom = _lookup(self.conn, name)
+        _require_running(dom, name)
+        if isinstance(stdin, str):
+            stdin = stdin.encode()
+        result = guest_agent.exec_command(dom, argv, stdin=stdin, timeout=timeout)
+        if result.timed_out:
+            _LOGGER.warning(
+                "%s: exec がタイムアウト command=%s pid=%d", name, argv[0], result.pid
+            )
+        else:
+            _LOGGER.info(
+                "%s: exec が終了 command=%s exit_code=%s signal=%s",
+                name,
+                argv[0],
+                result.exit_code,
+                result.signal,
+            )
+        return {
+            "pid": result.pid,
+            "exit_code": result.exit_code,
+            "signal": result.signal,
+            "stdout": result.stdout.decode(errors="replace"),
+            "stderr": result.stderr.decode(errors="replace"),
+            "truncated": result.truncated,
+            "timed_out": result.timed_out,
+        }
+
+    def pause(self, name: str) -> dict:
+        """稼働中の VM を一時停止(vCPU を凍結)する。
+
+        暴走したエージェントをその場で止め、メモリ・ディスクの状態を保ったまま調べる
+        ための操作。既に一時停止中なら何もせず現状を返す(冪等)。メモリは解放されない。
+
+        Returns:
+            spec と status をキーに持つ dict。
+
+        Raises:
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+            ServerNotRunning: 対象 VM が停止中の場合。
+        """
+        with self._locked(name):
+            dom = _lookup(self.conn, name)
+            state = dom.state()[0]
+            if state == libvirt.VIR_DOMAIN_PAUSED:
+                _LOGGER.info("%s: 既に一時停止中、変更なし", name)
+            elif dom.isActive():
+                dom.suspend()
+                _LOGGER.info("%s: 一時停止した", name)
+            else:
+                raise ServerNotRunning(name)
+            return self.get(name)
+
+    def resume(self, name: str) -> dict:
+        """一時停止中の VM を再開する。
+
+        既に稼働中(一時停止していない)なら何もせず現状を返す(冪等)。
+
+        Returns:
+            spec と status をキーに持つ dict。
+
+        Raises:
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+            ServerNotRunning: 対象 VM が停止中の場合。
+        """
+        with self._locked(name):
+            dom = _lookup(self.conn, name)
+            state = dom.state()[0]
+            if state == libvirt.VIR_DOMAIN_PAUSED:
+                dom.resume()
+                _LOGGER.info("%s: 再開した", name)
+            elif dom.isActive():
+                _LOGGER.info("%s: 一時停止していない、変更なし", name)
+            else:
+                raise ServerNotRunning(name)
+            return self.get(name)
+
+    def ssh_endpoint(self, name: str) -> dict:
+        """VM へ SSH 接続するための接続先を返す。
+
+        user-mode ネットワーク(macOS)では domain XML のポート転送先
+        (127.0.0.1:転送ポート)、libvirt ネットワークでは status と同じ方法で
+        解決した IP の 22 番を返す。鍵は cloud-init が authorized_keys に入れた
+        本ツール専用鍵(spec.ssh_identity_path)の秘密鍵。読み取りのみなので
+        ロックは取らない。
+
+        Returns:
+            host・port・user・identity_file を持つ dict。
+
+        Raises:
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+            ServerNotRunning: 対象 VM が停止中・一時停止中の場合。
+            GuestAgentUnavailable: 稼働中だが IP を解決できない場合(DHCP リースも
+                guest agent の報告も無い。起動直後に多い)。
+        """
+        dom = _lookup(self.conn, name)
+        _require_running(dom, name)
+        spec = _read_spec(dom)
+        port = ssh_forward_port(dom.XMLDesc(0))
+        if port is not None:
+            host = "127.0.0.1"
+        else:
+            host = _status_of(dom, spec)["ip"]
+            port = 22
+            if host is None:
+                raise GuestAgentUnavailable(
+                    f"{name}: IP アドレスを解決できません(DHCP リースも guest agent の"
+                    "報告もありません。起動直後なら待って再試行してください)"
+                )
+        return {
+            "host": host,
+            "port": port,
+            "user": ServerSpec(**spec).user,
+            "identity_file": str(ssh_identity_path()),
+        }
 
     def reinstall(self, name: str, secrets: dict[str, str] | None = None) -> dict:
         """管理対象の VM の disk を base から作り直し、同じ spec で再起動する。
