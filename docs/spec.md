@@ -7,6 +7,10 @@ VM の spec で指定できるフィールドの詳細。最小構成と全フ�
 
 `FilterRule`: `{port: int(1-65535), protocol: "tcp" | "udp"}` の inbound 許可ルール1件。
 
+`EgressRule`: `{action: "accept" | "drop"(既定 accept), cidr: str(IPv4 CIDR), protocol:
+"tcp" | "udp" | "all"(既定 all), port: int(1-65535) | null}` の outbound ルール1件。
+`port` は `protocol` が `tcp` / `udp` のときだけ指定できる。[egress](#egress) を参照。
+
 `StaticRoute`: `{destination: str(CIDR), via: str(IPv4アドレス)}` のスタティックルート1件。
 
 `NetworkAttachment`: `{name: str, address: str(CIDR、ホストアドレス), gateway: str(IPv4アドレス) | null,
@@ -15,6 +19,40 @@ nameservers: list[str(IPv4アドレス)], search: list[str(ドメイン名)]}` �
 はそのNICに設定するDNSサーバIPと検索ドメインのリストで、省略時は netplan に出力しない。
 `gateway` と異なり `nameservers` にはサブネット内検証を掛けない(ルータVM越しの別セグメントに
 立つDNSサーバのIPが正当な値のため)。
+
+## egress
+
+VM から外へ出る通信を絞る。`filters`(inbound)と同じ VM 専用の nwfilter に組み込まれる。
+
+| 値 | 意味 |
+|---|---|
+| 未指定(`null`) | 外向き全許可(従来どおり。egress 追加前に作った VM も同じ扱いで、差分にならない) |
+| リスト(最大 499 件) | 記述順に評価し、最初に一致したルールで accept / drop を決める。どれにも一致しなければ drop |
+| `[]` | 全 drop(DHCP と、inbound で受けた接続への戻りパケットは除く) |
+
+```yaml
+name: agent-1
+memory: 4096
+vcpus: 2
+base_image: ubuntu-26.04.img
+disk: 30
+egress:
+  - {cidr: 192.168.122.1/32, protocol: udp, port: 53}   # DNS(ホストの dnsmasq)
+  - {action: drop, cidr: 10.0.0.0/8}
+  - {action: drop, cidr: 172.16.0.0/12}
+  - {action: drop, cidr: 192.168.0.0/16}
+  - {cidr: 0.0.0.0/0}                                    # インターネットへは出す
+```
+
+- DNS の accept を書き忘れると名前解決できない。cloud-init の `packages`
+  (`qemu-guest-agent` の導入)にも DNS とパッケージミラーへの外向き通信が要る。
+- 宛先は IPv4 の CIDR だけで指定する(ドメイン名は不可)。egress を指定すると IPv6 の
+  送信はすべて遮断する。
+- `filters` / `egress` の変更は稼働中の VM にも止めずに反映できる。
+- macOS(user-mode ネットワーク)では指定できない(`PlatformUnsupported`)。
+
+評価順・よくある構成・稼働中の反映の仕組み・制約の詳細は [egress.md](egress.md)、
+エージェント用の VM の spec 例は [`examples/agent-home.yaml`](../examples/agent-home.yaml)。
 
 ## disk と base image の仮想サイズ
 

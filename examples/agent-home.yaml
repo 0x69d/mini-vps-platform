@@ -1,0 +1,39 @@
+# AI エージェントを住まわせる VM の spec 例。
+#
+# インターネットへは出せるが、ホストの LAN・社内網・同じホスト上の他の VM・
+# ホスト自身(DNS を除く)へは出せない。持ち出し先を LAN に広げないための構成。
+# egress の詳細は docs/egress.md を参照。
+#
+#   uv run mini-vps create examples/agent-home.yaml
+#
+# 前提: libvirt の default ネットワーク(192.168.122.0/24、ホスト側は
+# 192.168.122.1)に接続する。別のネットワークに繋ぐ場合は DNS の宛先を
+# そのネットワークのゲートウェイ(dnsmasq)に合わせること。
+name: agent-1
+memory: 4096
+vcpus: 2
+base_image: ubuntu-26.04.img
+disk: 30
+networks: [default]
+
+# inbound は SSH だけを受ける(戻り通信は egress に関係なく通る)。
+filters:
+  - {port: 22, protocol: tcp}
+
+# 記述順に評価し、どれにも当たらなければ drop。
+egress:
+  # 名前解決はホストの dnsmasq だけに許す。これが無いと名前解決できず、
+  # cloud-init の packages(qemu-guest-agent)の導入も失敗する。
+  - {cidr: 192.168.122.1/32, protocol: udp, port: 53}
+  - {cidr: 192.168.122.1/32, protocol: tcp, port: 53}
+  # プライベートアドレス全般(ホスト・default ネットワーク上の他 VM・ホストの LAN・
+  # 社内網)を遮断する。192.168.0.0/16 は 192.168.122.0/24 を含む。
+  - {action: drop, cidr: 10.0.0.0/8}
+  - {action: drop, cidr: 172.16.0.0/12}
+  - {action: drop, cidr: 192.168.0.0/16}
+  # CGNAT(Tailscale などの VPN でも使われる)とリンクローカル(クラウドの
+  # メタデータサービス 169.254.169.254 を含む)。
+  - {action: drop, cidr: 100.64.0.0/10}
+  - {action: drop, cidr: 169.254.0.0/16}
+  # 残り(インターネット)へは出す。
+  - {cidr: 0.0.0.0/0}

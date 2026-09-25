@@ -1,3 +1,5 @@
+import pathlib
+
 import pytest
 import yaml
 from pydantic import ValidationError
@@ -503,3 +505,17 @@ def test_load_spec_roundtrips_egress_through_yaml():
     )
     # metadata の YAML を読み戻して ServerSpec に通しても同じ値になる(差分にならない)
     assert ServerSpec(**yaml.safe_load(yaml.safe_dump(spec))).model_dump() == spec
+
+
+def test_load_spec_parses_agent_home_example():
+    path = pathlib.Path(__file__).parent.parent / "examples" / "agent-home.yaml"
+    spec = load_spec(path.read_text())
+    assert spec["filters"] == [{"port": 22, "protocol": "tcp"}]
+    # DNS の許可が drop より前、インターネットへの accept が最後
+    assert spec["egress"][0]["port"] == 53
+    assert spec["egress"][-1] == {
+        "action": "accept",
+        "cidr": "0.0.0.0/0",
+        "protocol": "all",
+        "port": None,
+    }
