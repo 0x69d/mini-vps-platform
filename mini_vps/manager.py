@@ -81,16 +81,22 @@ def _write_spec(dom, spec: dict) -> None:
     """VM スペックを YAML 化し、dom の <metadata> に書き込む。
 
     ElementTree でテキストノードを組むことで、spec 値の & < > が自動エスケープされる。
-    flags は AFFECT_CONFIG のみ。起動前に書くため、起動時の live が CONFIG を引き継ぐ。
+    新規作成時は起動前に書くため AFFECT_CONFIG だけで足り、起動時の live が CONFIG を
+    引き継ぐ。稼働中の domain(autostart・stack など稼働中に反映できる差分の収束)では
+    AFFECT_LIVE も付ける。_read_spec(flags=0 = AFFECT_CURRENT)は稼働中なら live 側を
+    読むため、CONFIG だけを書き換えると次の停止まで古い spec が読み戻される。
     """
     el = ET.Element("spec")
     el.text = yaml.safe_dump(spec)
+    flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
+    if dom.isActive():
+        flags |= libvirt.VIR_DOMAIN_AFFECT_LIVE
     dom.setMetadata(
         libvirt.VIR_DOMAIN_METADATA_ELEMENT,
         ET.tostring(el, encoding="unicode"),
         METADATA_KEY,
         METADATA_NS,
-        libvirt.VIR_DOMAIN_AFFECT_CONFIG,
+        flags,
     )
 
 
