@@ -168,3 +168,18 @@ static_routes:
 journalctl -u minivps-static-routes.service
 ip route show
 ```
+
+## スタック(stack / depends_on)
+
+複数の VM をスタックファイルにまとめて `plan` / `apply` で扱うためのフィールド
+([stacks.md](stacks.md) 参照)。どちらも domain(XML・ディスク・ネットワーク)には
+影響せず、libvirt metadata の spec にだけ載る。そのため稼働中の VM でも、
+`create` / `PUT` の再実行で metadata の書き換えだけで反映できる。
+
+| キー | 型 | デフォルト | 意味 |
+|---|---|---|---|
+| `stack` | str \| null(`name` と同じ文字種制約) | null | 所属スタック名。`apply --prune` が「このスタックの VM か」の判定に使うラベル。スタックファイルから作ると自動で補完される |
+| `depends_on` | list[str](`name` と同じ文字種制約、重複不可、自分自身は不可) | `[]` | 先に作成・起動しておく VM の name。同じスタック内、または既存の管理 VM を指す。`apply` の適用順と `--wait` の待ち対象を決める |
+
+単体の `create` / `PUT /servers/{name}` でも指定できるが、そこでは値を保存するだけで
+順序や存在の検証はしない(検証は `plan` / `apply` が行う)。
