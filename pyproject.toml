@@ -11,6 +11,7 @@ requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.138.1",
     "libvirt-python==12.0.0",
+    "mcp>=2.2",
     "prometheus-client>=0.25.0",
     "pycdlib>=1.20.0",
     "pydantic>=2.13.4",
@@ -21,6 +22,7 @@ dependencies = [
 
 [project.scripts]
 mini-vps = "mini_vps.cli:run"
+mini-vps-mcp = "mini_vps.mcp_server:main"
 
 [tool.setuptools]
 # フラットレイアウトの自動検出に tests/ を巻き込ませないよう明示する。
