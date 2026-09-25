@@ -434,9 +434,9 @@ wheels = [
 
 [[package]]
 name = "libvirt-python"
-version = "12.0.0"
+version = "12.7.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/5e/cd/a8fdd1c691f2a6a6dc8b0711b42473a7342e4d1a7a1e9ef90677a236eb73/libvirt_python-12.0.0.tar.gz", hash = "sha256:7b4de7d2dde2bc380cf4e108d1eeb8aad50beb3ae351ab9265a7fedc587742bc", size = 243300, upload-time = "2026-01-15T09:14:43.074Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/00/19/729ba9584cac034ecaa8a42ebb6412007382dda13df635ac61adecd7e949/libvirt_python-12.7.0.tar.gz", hash = "sha256:03a6800a3cc7657267e2516f579ce95c93d6351182caf03f92a49556685bf8bf", size = 256560, upload-time = "2026-09-01T08:34:07.984Z" }
 
 [[package]]
 name = "markdown-it-py"
@@ -557,7 +557,7 @@ ops = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.138.1" },
-    { name = "libvirt-python", specifier = "==12.0.0" },
+    { name = "libvirt-python", specifier = "==12.7.0" },
     { name = "mcp", specifier = ">=2.2" },
     { name = "prometheus-client", specifier = ">=0.25.0" },
     { name = "pycdlib", specifier = ">=1.20.0" },
