@@ -239,6 +239,12 @@ def test_build_domain_xml_on_macos_uses_hvf_aarch64_virt():
     assert driver.get("cache") is None
 
 
+def test_build_domain_xml_omits_pm_on_aarch64():
+    # libvirt は x86 以外の <pm> を enabled='no' でも拒否する。
+    root = _domain(profile=macos_profile(), ssh_port=2201)
+    assert root.find("pm") is None
+
+
 def test_build_domain_xml_on_aarch64_attaches_seed_as_readonly_virtio_disk():
     root = _domain(profile=macos_profile(), ssh_port=2201)
     seed = root.findall("devices/disk")[1]

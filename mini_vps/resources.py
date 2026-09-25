@@ -351,6 +351,10 @@ def build_nwfilter_xml(spec) -> str:
     return NWFILTER_XML_TEMPLATE.format(name=_filter_name(spec), port_rules=port_rules)
 
 
+# libvirt の ARCH_IS_X86 に相当する arch 名。<pm> を出してよいかの判定に使う。
+_X86_ARCHES = frozenset({"x86_64", "i686"})
+
+
 def _sub(parent: ET.Element, tag: str, text: str | None = None, **attrs):
     """属性値が None のものを落として子要素を作る(ElementTree の小さな補助)。"""
     el = ET.SubElement(parent, tag, {k: v for k, v in attrs.items() if v is not None})
@@ -403,9 +407,13 @@ def build_domain_xml(
     features = _sub(root, "features")
     _sub(features, "acpi")
     _sub(root, "clock", offset="utc")
-    pm = _sub(root, "pm")
-    _sub(pm, "suspend-to-mem", enabled="no")
-    _sub(pm, "suspend-to-disk", enabled="no")
+    # libvirt は x86 以外で <pm> を指定すると enabled='no' であっても
+    # "setting ACPI S3/S4 not supported" で拒否する(qemu_validate.c)。
+    # aarch64 の virt machine には S3/S4 がそもそも無いので、x86 のときだけ出す。
+    if profile.arch in _X86_ARCHES:
+        pm = _sub(root, "pm")
+        _sub(pm, "suspend-to-mem", enabled="no")
+        _sub(pm, "suspend-to-disk", enabled="no")
 
     devices = _sub(root, "devices")
     disk = _sub(devices, "disk", type="file", device="disk")
