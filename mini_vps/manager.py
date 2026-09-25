@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 import libvirt
 import yaml
 
-from . import dns_registration, guest_agent
+from . import dns_registration, guest_agent, snapshots
 from . import doctor as doctor_module
 from .admission import check_capacity, needs_recheck
 from .config import METADATA_KEY, METADATA_NS
@@ -41,7 +41,7 @@ from .resources import (
     set_domain_filterref_xml,
     ssh_forward_port,
 )
-from .spec import ServerSpec, read_pubkey, ssh_identity_path
+from .spec import ServerSpec, read_pubkey, ssh_identity_path, validate_snapshot_name
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -804,6 +804,12 @@ class ServerManager:
         delete→add の組なので無害で、DNS 有効化前に作った VM のレコードを
         後追い補充する復旧手段を兼ねる。docs/dns-registration.md 参照。
 
+        スナップショットはすべて破棄する(中身はマージしない)。スナップショット後は
+        ルートディスクの source が `{name}.snap-*.qcow2` を指しており、その backing の
+        `{name}.qcow2` を作り直すと chain が壊れるため、メタデータとファイルを消して
+        source を `{name}.qcow2` へ戻してから overlay を作り直す
+        (snapshots.discard_all)。
+
         Returns:
             spec と status をキーに持つ dict。
 
@@ -820,6 +826,7 @@ class ServerManager:
 
             if dom.isActive():
                 dom.destroy()
+            snapshots.discard_all(self.conn, dom, name)
             create_overlay_volume(self.conn, spec)
 
             ensure_network_active(self.conn, spec)
@@ -831,3 +838,90 @@ class ServerManager:
             dns_registration.register(spec)
             _LOGGER.info("%s: 再インストールが完了", name)
             return self.get(name)
+
+    def snapshot_create(self, name: str, snap: str, quiesce: bool = False) -> dict:
+        """ルートディスクの外部 disk-only スナップショットを作る。
+
+        エージェントに危険な操作をさせる前のチェックポイント。メモリ状態は含まない。
+        詳細は snapshots.create と docs/snapshots.md 参照。
+
+        Args:
+            name: VM 名。
+            snap: スナップショット名(spec.validate_snapshot_name で検証する)。
+            quiesce: guest agent でゲストのファイルシステムを凍結してから取るか。
+
+        Returns:
+            作ったスナップショットの name・created_at・parent・state・current。
+
+        Raises:
+            pydantic.ValidationError: スナップショット名が不正な場合。
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+            ServerConflict: 同名のスナップショットが既にある場合など。
+            ServerNotRunning: quiesce=True なのに VM が稼働中でない場合。
+        """
+        validate_snapshot_name(snap)
+        with self._locked(name):
+            dom = _lookup(self.conn, name)
+            return snapshots.create(self.conn, dom, name, snap, quiesce=quiesce)
+
+    def snapshot_list(self, name: str) -> list[dict]:
+        """スナップショットの一覧を作成時刻の古い順に返す。
+
+        Raises:
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+        """
+        return snapshots.list_snapshots(_lookup(self.conn, name))
+
+    def snapshot_revert(self, name: str, snap: str) -> dict:
+        """ルートディスクをスナップショットの時点へ巻き戻す。
+
+        稼働中の VM は強制停止してから巻き戻して起動し直す(電源状態は前後で保つ)。
+        snap より新しいスナップショットは捨てる。詳細は snapshots.revert 参照。
+
+        Returns:
+            reverted_to・discarded と、spec・status をキーに持つ dict。
+
+        Raises:
+            pydantic.ValidationError: スナップショット名が不正な場合。
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+            SnapshotNotFound: スナップショットが存在しない場合。
+            ServerConflict: スナップショットが mini-vps の外で作られた場合など。
+        """
+        validate_snapshot_name(snap)
+        with self._locked(name):
+            dom = _lookup(self.conn, name)
+            spec = _read_spec(dom)
+            result = snapshots.revert(
+                self.conn,
+                dom,
+                spec,
+                snap,
+                before_start=lambda: ensure_network_active(self.conn, spec),
+            )
+            return {**result, **self.get(name)}
+
+    def snapshot_delete(self, name: str, snap: str) -> None:
+        """スナップショットを削除する(今のディスクの内容は変わらない)。
+
+        詳細は snapshots.delete 参照。停止中の VM では libvirt が commit のために
+        QEMU を一時的に起動するため、先に VM のネットワークを起動する。
+
+        Raises:
+            pydantic.ValidationError: スナップショット名が不正な場合。
+            ServerNotFound: 指定した name が存在しない、または管理対象外の場合。
+            SnapshotNotFound: スナップショットが存在しない場合。
+            PlatformUnsupported: libvirt が 9.0.0 より古い場合。
+            ServerConflict: スナップショットが mini-vps の外で作られた場合など。
+        """
+        validate_snapshot_name(snap)
+        with self._locked(name):
+            dom = _lookup(self.conn, name)
+            snapshots.delete(
+                self.conn,
+                dom,
+                name,
+                snap,
+                before_offline_merge=lambda: ensure_network_active(
+                    self.conn, _read_spec(dom)
+                ),
+            )

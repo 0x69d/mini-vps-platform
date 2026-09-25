@@ -102,6 +102,14 @@ class InsufficientCapacity(MiniVpsError):
     """
 
 
+class SnapshotNotFound(MiniVpsError):
+    """指定した VM に、指定した名前のスナップショットが存在しないことを表す。
+
+    VM 自体が無い場合は ServerNotFound を使い、こちらは VM が存在する前提で
+    スナップショットだけが見つからない場合に限る。
+    """
+
+
 @dataclasses.dataclass(frozen=True)
 class ErrorMapping:
     """例外1種類分の正規化先。
@@ -130,6 +138,7 @@ ERROR_TABLE: dict[type[Exception], ErrorMapping] = {
     # 入力の誤り(argv・stdin・ゲストに無いコマンド)。1 は入力エラーの共通コード。
     GuestExecError: ErrorMapping(422, 1, "guest exec failed"),
     InsufficientCapacity: ErrorMapping(507, 11, "insufficient capacity"),
+    SnapshotNotFound: ErrorMapping(404, 10, "snapshot not found"),
 }
 
 

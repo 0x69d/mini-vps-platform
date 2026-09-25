@@ -6,9 +6,10 @@ manager の例外は exception_handler で HTTP ステータスへ正規化す�
 
 import logging
 from contextlib import asynccontextmanager
+from typing import Annotated
 
 import libvirt
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Path, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -17,7 +18,12 @@ from .doctor import has_error
 from .logging_config import configure as configure_logging
 from .manager import ServerManager, register_quiet_error_handler
 from .platform_profile import get_profile
-from .spec import ServerSpec, ServerSpecInput
+from .spec import (
+    SNAPSHOT_NAME_PATTERN,
+    ServerSpec,
+    ServerSpecInput,
+    SnapshotName,
+)
 from .stack import (
     DEFAULT_WAIT_TIMEOUT,
     StackDefinition,
@@ -350,3 +356,56 @@ def reinstall_server(
     """
     secrets = body.secrets if body else None
     return mgr.reinstall(name, secrets=secrets or None)
+
+
+# --- snapshots(docs/snapshots.md) ---
+
+# パスの {snap} を ServerManager に渡す前に検証する(規則は spec.py が持つ)。
+_SnapshotPath = Annotated[str, Path(pattern=SNAPSHOT_NAME_PATTERN)]
+
+
+class SnapshotCreateRequest(BaseModel):
+    """POST /servers/{name}/snapshots の body。"""
+
+    name: SnapshotName
+    quiesce: bool = False
+
+
+@app.post("/servers/{name}/snapshots", status_code=201)
+def create_snapshot(
+    name: str,
+    body: SnapshotCreateRequest,
+    mgr: ServerManager = Depends(get_manager),
+) -> dict:
+    """ルートディスクのスナップショットを作る(同名があれば 409)。"""
+    return mgr.snapshot_create(name, body.name, quiesce=body.quiesce)
+
+
+@app.get("/servers/{name}/snapshots")
+def list_snapshots(name: str, mgr: ServerManager = Depends(get_manager)) -> dict:
+    """スナップショットの一覧を作成時刻の古い順に返す。"""
+    return {"snapshots": mgr.snapshot_list(name)}
+
+
+@app.post("/servers/{name}/snapshots/{snap}/revert")
+def revert_snapshot(
+    name: str,
+    snap: _SnapshotPath,
+    mgr: ServerManager = Depends(get_manager),
+) -> dict:
+    """ルートディスクをスナップショットの時点へ巻き戻す(無ければ 404)。
+
+    稼働中の VM は強制停止してから巻き戻して起動し直す。より新しいスナップショットは
+    捨てる(レスポンスの discarded)。
+    """
+    return mgr.snapshot_revert(name, snap)
+
+
+@app.delete("/servers/{name}/snapshots/{snap}", status_code=204)
+def delete_snapshot(
+    name: str,
+    snap: _SnapshotPath,
+    mgr: ServerManager = Depends(get_manager),
+) -> None:
+    """スナップショットを削除する(今のディスクの内容は変わらない。無ければ 404)。"""
+    mgr.snapshot_delete(name, snap)

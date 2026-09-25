@@ -600,3 +600,67 @@ def main(argv: list[str] | None = None, manager_factory=None) -> int:
 def run() -> None:
     """コンソールスクリプト(`mini-vps`)のエントリポイント。"""
     sys.exit(main())
+
+
+# --- snapshot(docs/snapshots.md) ---
+
+snapshot_app = typer.Typer(
+    help="VM のディスクスナップショット(チェックポイント)を操作する"
+)
+app.add_typer(snapshot_app, name="snapshot")
+
+
+def _snapshot_command(name: str, *, help: str):
+    """`_run_command` を適用したうえで `snapshot` サブアプリに登録するデコレータ。"""
+
+    def decorator(func):
+        return snapshot_app.command(name, help=help)(_run_command(func))
+
+    return decorator
+
+
+@_snapshot_command("create", help="ルートディスクのスナップショットを作る")
+def _cmd_snapshot_create(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="VM 名")],
+    snap: Annotated[str, typer.Argument(help="スナップショット名")],
+    quiesce: Annotated[
+        bool,
+        typer.Option(
+            "--quiesce",
+            help="guest agent でゲストのファイルシステムを凍結してから取る",
+        ),
+    ] = False,
+) -> dict:
+    """VM のルートディスクのスナップショットを作る(ServerManager.snapshot_create)。"""
+    return ctx.obj.snapshot_create(name, snap, quiesce=quiesce)
+
+
+@_snapshot_command("list", help="スナップショットの一覧を表示する")
+def _cmd_snapshot_list(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="VM 名")],
+) -> dict:
+    """スナップショットの一覧を作成時刻の古い順に返す。"""
+    return {"snapshots": ctx.obj.snapshot_list(name)}
+
+
+@_snapshot_command("revert", help="ルートディスクをスナップショットの時点へ巻き戻す")
+def _cmd_snapshot_revert(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="VM 名")],
+    snap: Annotated[str, typer.Argument(help="スナップショット名")],
+) -> dict:
+    """ルートディスクを巻き戻す(より新しいスナップショットは捨てる)。"""
+    return ctx.obj.snapshot_revert(name, snap)
+
+
+@_snapshot_command("delete", help="スナップショットを削除する(今のディスクは保つ)")
+def _cmd_snapshot_delete(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="VM 名")],
+    snap: Annotated[str, typer.Argument(help="スナップショット名")],
+) -> str:
+    """スナップショットを削除する(ServerManager.snapshot_delete)。"""
+    ctx.obj.snapshot_delete(name, snap)
+    return f"deleted snapshot: {name}/{snap}"

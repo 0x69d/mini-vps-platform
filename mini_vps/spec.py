@@ -14,6 +14,7 @@ from pydantic import (
     BaseModel,
     Field,
     StringConstraints,
+    TypeAdapter,
     field_serializer,
     model_validator,
 )
@@ -225,6 +226,30 @@ class ServerSpec(ServerSpecInput):
         if self.name in self.depends_on:
             raise ValueError(f"depends_on に自分自身({self.name})は指定できません")
         return self
+
+
+# スナップショット名用。overlay のファイル名 `{vm}.snap-{snap}.qcow2` と、libvirt が
+# スナップショット定義を保存するファイル名にそのまま埋め込まれる。_NAME_PATTERN と
+# 同じ文字種で、`.` を含まない。`.` を許すと `{vm}.snap-{snap}.qcow2` の区切りが
+# 曖昧になり、孤児ファイルの判定(VM 名とスナップショット名への分解)が壊れる。
+# libvirt が拒否する「先頭の `.`」と「`/`」もこの文字種で自然に防げる。
+SNAPSHOT_NAME_PATTERN = _NAME_PATTERN
+
+SnapshotName = Annotated[str, StringConstraints(pattern=SNAPSHOT_NAME_PATTERN)]
+
+_SNAPSHOT_NAME_ADAPTER = TypeAdapter(SnapshotName)
+
+
+def validate_snapshot_name(name: str) -> str:
+    """スナップショット名を検証して返す。
+
+    CLI・Web API・MCP のどの入口から来ても同じ規則で検証するため、管理層
+    (ServerManager の snapshot_* メソッド)がこの関数を呼ぶ。
+
+    Raises:
+        pydantic.ValidationError: 名前が SNAPSHOT_NAME_PATTERN に合わない場合。
+    """
+    return _SNAPSHOT_NAME_ADAPTER.validate_python(name)
 
 
 def load_sample_spec() -> str:
