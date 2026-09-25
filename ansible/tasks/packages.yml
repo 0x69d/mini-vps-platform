@@ -6,7 +6,6 @@
       - libvirt-clients
       - qemu-system-x86
       - qemu-utils
-      - cloud-image-utils
       - libvirt-dev
       - python3-dev
       - pkg-config
@@ -27,7 +26,6 @@
       - libvirt-client
       - qemu-kvm
       - qemu-img
-      - cloud-utils
       - libvirt-devel
       - python3-devel
       - pkgconf-pkg-config

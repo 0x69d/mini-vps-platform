@@ -13,12 +13,24 @@
     dest: "{{ images_pool_path }}/{{ item.item.name }}"
     owner: root
     group: root
-    mode: "0644"
+    # 使用中の VM の backing file になるため、誤って上書きしないよう読み取り専用にする。
+    mode: "0444"
     timeout: 1800
   loop: "{{ minivps_base_image_stats.results }}"
   loop_control:
     label: "{{ item.item.name }}"
   when: not item.stat.exists
+
+# 以前 0644 で取得したものも含め、配置済みの base image を読み取り専用に揃える。
+- name: 取得済みの base image を読み取り専用にする
+  become: true
+  ansible.builtin.file:
+    path: "{{ images_pool_path }}/{{ item.item.name }}"
+    mode: "0444"
+  loop: "{{ minivps_base_image_stats.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: item.stat.exists
 
 - name: images プールをリフレッシュする(新規配置分をvirshに認識させる)
   become: true

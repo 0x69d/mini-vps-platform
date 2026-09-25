@@ -1,0 +1,30 @@
+# name 単位のプロセス間ロック(mini_vps/locks.py)のファイルを置くディレクトリ。
+# CLI・Web API・MCP サーバが別プロセス・別ユーザーでも同じロックを取れるよう、
+# libvirt グループで共有し、setgid で作成されるロックファイルのグループを揃える。
+# /run は tmpfs で再起動のたびに消えるため、systemd-tmpfiles で起動時に作り直す。
+- name: ロックディレクトリの tmpfiles.d 設定を配置する
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/minivps.conf
+    content: |
+      # mini-vps-platform: name 単位のプロセス間ロック(ansible/tasks/locks_dir.yml)
+      d {{ lock_dir | dirname }} 0755 root root -
+      d {{ lock_dir }} 2775 root libvirt -
+    owner: root
+    group: root
+    mode: "0644"
+
+# tmpfiles.d は次の起動から効くため、今の起動中のぶんはここで作る。
+- name: ロックディレクトリを作成する
+  become: true
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ lock_dir | dirname }}", group: root, mode: "0755" }
+    - { path: "{{ lock_dir }}", group: libvirt, mode: "2775" }
+  loop_control:
+    label: "{{ item.path }}"

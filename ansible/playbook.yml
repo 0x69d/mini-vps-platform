@@ -12,6 +12,8 @@
     vps_home: "{{ ansible_facts['user_dir'] }}"
     seed_dir: /var/lib/libvirt/seeds
     images_pool_path: /var/lib/libvirt/images
+    # mini_vps/platform_profile.py の Linux 既定(MINIVPS_LOCK_DIR)と揃える。
+    lock_dir: /run/minivps/locks
   vars_files:
     - vars/guest_images.yml
     - vars/network_segments.yml
@@ -21,6 +23,12 @@
 
     - name: libvirtd を有効化しグループを設定する
       ansible.builtin.import_tasks: tasks/libvirtd.yml
+
+    - name: ホスト停止時にゲストを正常終了させる
+      ansible.builtin.import_tasks: tasks/libvirt_guests.yml
+
+    - name: プロセス間ロックのディレクトリを用意する
+      ansible.builtin.import_tasks: tasks/locks_dir.yml
 
     - name: default ネットワークを用意する
       ansible.builtin.import_tasks: tasks/network.yml
