@@ -1,30 +1,21 @@
 """リソースの定数と XML テンプレート群。"""
 
-LIBVIRT_URI = "qemu:///system"
 POOL_NAME = "vps-pool"
-POOL_PATH = "/var/lib/libvirt/vps-pool"
 BASE_POOL = "images"
-SEED_DIR = "/var/lib/libvirt/seeds"
 SEED_POOL_NAME = "vps-seeds"
 
 # 管理対象 domain の <metadata> に spec を埋め込むための名前空間。
 # URI は単なる一意識別子で、機能上は任意の文字列でよい(プレースホルダ)。
 METADATA_NS = "https://example.org/minivps"
 METADATA_KEY = "minivps"
-POOL_XML = f"""
-<pool type='dir'>
-  <name>{POOL_NAME}</name>
-  <target>
-    <path>{POOL_PATH}</path>
-  </target>
-</pool>
-"""
 
-SEED_POOL_XML = f"""
+# dir 型ストレージプール。パスはプラットフォームごとに異なるため
+# HostProfile(pool_path / seed_dir)から埋める。
+POOL_XML_TEMPLATE = """
 <pool type='dir'>
-  <name>{SEED_POOL_NAME}</name>
+  <name>{name}</name>
   <target>
-    <path>{SEED_DIR}</path>
+    <path>{path}</path>
   </target>
 </pool>
 """
@@ -58,67 +49,18 @@ instance-id: iid-{name}-001
 local-hostname: {hostname}
 """
 
-DOMAIN_XML_TEMPLATE = """
-<domain type='kvm'>
-  <name>{name}</name>
-  <memory unit='KiB'>{memory_kib}</memory>
-  <vcpu>{vcpus}</vcpu>
-  <cpu mode='host-model'/>
-  <os firmware='efi'>
-    <type arch='x86_64' machine='q35'>hvm</type>
-    <loader secure='no'/>
-    <boot dev='hd'/>
-  </os>
-  <features>
-    <acpi/>
-  </features>
-  <clock offset='utc'/>
-  <pm>
-    <suspend-to-mem enabled='no'/>
-    <suspend-to-disk enabled='no'/>
-  </pm>
-  <devices>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2' discard='unmap'/>
-      <source file='{overlay_path}'/>
-      <target dev='vda' bus='virtio'/>
-    </disk>
-    <disk type='file' device='cdrom'>
-      <driver name='qemu' type='raw'/>
-      <source file='{seed_path}'/>
-      <target dev='sda' bus='sata'/>
-      <readonly/>
-    </disk>
-{interfaces}\
-    <rng model='virtio'>
-      <backend model='random'>/dev/urandom</backend>
-    </rng>
-    <memballoon model='virtio'>
-      <stats period='{balloon_stats_period}'/>
-    </memballoon>
-    <serial type='pty'><target port='0'/></serial>
-    <console type='pty'><target type='serial' port='0'/></console>
-  </devices>
-</domain>
-"""
-
 # <memballoon> の統計収集間隔(秒)。libvirt は既定でこの要素を暗黙に追加するが、
 # <stats period> が無いと balloon.available/usable がゲスト内の実使用量として
 # 更新されず、一度取った値のまま古くなる。Prometheus の scrape_interval 15s より
 # 短くして、スクレイプごとに新しい値が乗るようにする。
 BALLOON_STATS_PERIOD_SECONDS = 5
 
-# VM 1台につき spec["networks"] の要素数だけ連結して <devices> に埋め込む。
-# str.format はブロックの繰り返し生成ができないため、DOMAIN_XML_TEMPLATE から
-# <interface> 部分だけを分離している。
-INTERFACE_XML_TEMPLATE = """\
-    <interface type='network'>
-      <mac address='{mac}'/>
-      <source network='{network}'/>
-      <model type='virtio'/>
-      {filterref}
-    </interface>
-"""
+# qemu-guest-agent の virtio-serial チャネル名。libvirt と QEMU の既定値に合わせる。
+GUEST_AGENT_CHANNEL = "org.qemu.guest_agent.0"
+
+# domain XML で QEMU のコマンドライン引数を直接渡すための名前空間。user-mode
+# ネットワーク(macOS)で SSH のポート転送を指定するのに使う。
+QEMU_XML_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 
 # 宣言ポート1件分の accept ルール。protocol("tcp"/"udp")に応じてタグ名を差し替える。
 NWFILTER_PORT_RULE_TEMPLATE = """\

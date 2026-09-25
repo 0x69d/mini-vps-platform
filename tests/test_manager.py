@@ -2,9 +2,10 @@ from unittest.mock import MagicMock
 
 import libvirt
 import pytest
-from conftest import make_libvirt_error
+from conftest import macos_profile, make_libvirt_error
 
 from mini_vps.manager import (
+    PlatformUnsupported,
     ServerConflict,
     ServerManager,
     ServerNotFound,
@@ -19,6 +20,7 @@ from mini_vps.manager import (
     _write_spec,
     register_quiet_error_handler,
 )
+from mini_vps.platform_profile import set_profile
 from mini_vps.spec import ServerSpec
 
 # --- register_quiet_error_handler ---
@@ -423,7 +425,7 @@ def test_locked_logs_only_when_contended(caplog):
     """ロックが空いていれば待ちログは出ない。"""
     mgr = ServerManager(MagicMock())
 
-    with caplog.at_level("DEBUG", logger="mini_vps.manager"):
+    with caplog.at_level("DEBUG", logger="mini_vps"):
         with mgr._locked("web-1"):
             pass
 
@@ -436,7 +438,7 @@ def test_locked_logs_wait_when_already_held(caplog):
     import time
 
     mgr = ServerManager(MagicMock())
-    lock = mgr._lock_for("web-1")
+    lock = mgr._locks._thread_lock("web-1")
     lock.acquire()
 
     entered = threading.Event()
@@ -445,7 +447,7 @@ def test_locked_logs_wait_when_already_held(caplog):
         with mgr._locked("web-1"):
             entered.set()
 
-    with caplog.at_level("DEBUG", logger="mini_vps.manager"):
+    with caplog.at_level("DEBUG", logger="mini_vps"):
         thread = threading.Thread(target=_worker)
         thread.start()
         # ワーカーが待ちログを出してブロックするまで待ってから解放する。
@@ -457,7 +459,7 @@ def test_locked_logs_wait_when_already_held(caplog):
         thread.join(timeout=5)
 
     assert entered.is_set()
-    assert "web-1: ロック待ち" in [r.getMessage() for r in caplog.records]
+    assert "web-1: ロック待ち(同一プロセス)" in [r.getMessage() for r in caplog.records]
 
 
 def test_create_forwards_secrets_to_provision(monkeypatch):
@@ -513,6 +515,54 @@ def test_create_raises_server_running_when_mutable_diff_and_active(monkeypatch):
 
     dom.XMLDesc.assert_not_called()
     conn.defineXML.assert_not_called()
+
+
+def test_create_converges_autostart_while_running_without_redefining(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    dom.isActive.return_value = True
+    old_spec = ServerSpec(**_full_spec()).model_dump()
+    new_spec = ServerSpec(**_full_spec(autostart=False)).model_dump()
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: old_spec)
+    write_spec_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager._write_spec", write_spec_mock)
+    mgr.get = MagicMock(return_value={"spec": new_spec, "status": {}})
+
+    _, created = mgr.create(new_spec)
+
+    assert created is False
+    dom.setAutostart.assert_called_once_with(0)
+    conn.defineXML.assert_not_called()
+    write_spec_mock.assert_called_once_with(dom, new_spec)
+
+
+def test_create_rejects_unsupported_platform_before_touching_libvirt(monkeypatch):
+    set_profile(macos_profile())
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    find_mock = MagicMock()
+    monkeypatch.setattr("mini_vps.manager._find_domain", find_mock)
+    spec = ServerSpec(**_full_spec(filters=[])).model_dump()
+
+    with pytest.raises(PlatformUnsupported):
+        mgr.create(spec)
+
+    find_mock.assert_not_called()
+
+
+def test_create_conflict_message_names_recreate_fields(monkeypatch):
+    conn = MagicMock()
+    mgr = ServerManager(conn)
+    dom = MagicMock()
+    monkeypatch.setattr("mini_vps.manager._find_domain", lambda c, n: dom)
+    monkeypatch.setattr("mini_vps.manager._is_managed", lambda d: True)
+    monkeypatch.setattr("mini_vps.manager._read_spec", lambda d: _full_spec())
+
+    with pytest.raises(ServerConflict, match="disk"):
+        mgr.create(ServerSpec(**_full_spec(disk=20)).model_dump())
 
 
 def test_create_converges_memory_only_when_stopped(monkeypatch):

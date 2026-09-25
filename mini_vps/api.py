@@ -12,16 +12,10 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .config import LIBVIRT_URI
+from . import errors
 from .logging_config import configure as configure_logging
-from .manager import (
-    ServerConflict,
-    ServerManager,
-    ServerNotFound,
-    ServerNotRunning,
-    ServerRunning,
-    register_quiet_error_handler,
-)
+from .manager import ServerManager, register_quiet_error_handler
+from .platform_profile import get_profile
 from .spec import ServerSpec, ServerSpecInput
 from .startup_scripts import StartupScriptError
 
@@ -44,7 +38,7 @@ async def lifespan(app: FastAPI):
     """
     configure_logging()
     register_quiet_error_handler()
-    conn = libvirt.open(LIBVIRT_URI)
+    conn = libvirt.open(get_profile().libvirt_uri)
     app.state.manager = ServerManager(conn)
     try:
         yield
@@ -82,30 +76,18 @@ def get_manager(request: Request) -> ServerManager:
     return request.app.state.manager
 
 
-@app.exception_handler(ServerNotFound)
-async def _not_found_handler(request: Request, exc: ServerNotFound) -> JSONResponse:
-    """ServerNotFound を 404 に変換する。"""
-    return JSONResponse(status_code=404, content={"detail": f"server not found: {exc}"})
-
-
-@app.exception_handler(ServerConflict)
-async def _conflict_handler(request: Request, exc: ServerConflict) -> JSONResponse:
-    """ServerConflict を 409 に変換する。"""
-    return JSONResponse(status_code=409, content={"detail": f"server conflict: {exc}"})
-
-
-@app.exception_handler(ServerNotRunning)
-async def _not_running_handler(request: Request, exc: ServerNotRunning) -> JSONResponse:
-    """ServerNotRunning を 409 に変換する。"""
+@app.exception_handler(errors.MiniVpsError)
+async def _minivps_error_handler(
+    request: Request, exc: errors.MiniVpsError
+) -> JSONResponse:
+    """管理層の例外を errors.ERROR_TABLE の HTTP ステータスに変換する。"""
+    mapping = errors.lookup(exc)
+    if mapping is None:
+        raise exc
     return JSONResponse(
-        status_code=409, content={"detail": f"server not running: {exc}"}
+        status_code=mapping.http_status,
+        content={"detail": f"{mapping.label}: {exc}"},
     )
-
-
-@app.exception_handler(ServerRunning)
-async def _running_handler(request: Request, exc: ServerRunning) -> JSONResponse:
-    """ServerRunning を 409 に変換する。"""
-    return JSONResponse(status_code=409, content={"detail": f"server running: {exc}"})
 
 
 @app.exception_handler(StartupScriptError)

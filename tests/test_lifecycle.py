@@ -2,6 +2,7 @@ from unittest.mock import MagicMock
 
 import libvirt
 import pytest
+from conftest import macos_profile
 
 from mini_vps.config import POOL_NAME, SEED_POOL_NAME
 from mini_vps.lifecycle import (
@@ -9,8 +10,10 @@ from mini_vps.lifecycle import (
     ensure_network_active,
     provision,
     teardown,
+    used_ssh_ports,
     wait_for_ip,
 )
+from mini_vps.platform_profile import get_profile, set_profile
 
 # --- ensure_network_active ---
 
@@ -91,7 +94,12 @@ def test_provision_defines_nwfilter_when_filters_present(stub_provision_deps):
 
     conn.nwfilterDefineXML.assert_called_once_with("<filter/>")
     stub_provision_deps.assert_called_once_with(
-        spec, "/overlay.qcow2", "/seed.iso", filter_name="minivps-web-1"
+        spec,
+        "/overlay.qcow2",
+        "/seed.iso",
+        filter_name="minivps-web-1",
+        profile=get_profile(),
+        ssh_port=None,
     )
     conn.defineXML.assert_called_once_with("<domain/>")
 
@@ -104,8 +112,74 @@ def test_provision_skips_nwfilter_when_absent(stub_provision_deps):
 
     conn.nwfilterDefineXML.assert_not_called()
     stub_provision_deps.assert_called_once_with(
-        spec, "/overlay.qcow2", "/seed.iso", filter_name=None
+        spec,
+        "/overlay.qcow2",
+        "/seed.iso",
+        filter_name=None,
+        profile=get_profile(),
+        ssh_port=None,
     )
+
+
+def test_provision_sets_autostart_from_spec(stub_provision_deps):
+    conn = MagicMock()
+
+    provision(conn, {"name": "web-1", "autostart": False})
+
+    conn.defineXML.return_value.setAutostart.assert_called_once_with(0)
+
+
+def test_provision_enables_autostart_by_default(stub_provision_deps):
+    conn = MagicMock()
+
+    provision(conn, {"name": "web-1"})
+
+    conn.defineXML.return_value.setAutostart.assert_called_once_with(1)
+
+
+def test_provision_allocates_ssh_port_in_user_mode(monkeypatch, stub_provision_deps):
+    set_profile(macos_profile(ssh_port_range=(2201, 2210)))
+    monkeypatch.setattr("mini_vps.lifecycle.used_ssh_ports", lambda c: {2201})
+    monkeypatch.setattr("mini_vps.resources._port_is_free", lambda p: True)
+    conn = MagicMock()
+
+    provision(conn, {"name": "web-1"})
+
+    assert stub_provision_deps.call_args.kwargs["ssh_port"] == 2202
+
+
+def test_used_ssh_ports_collects_forward_ports_from_all_domains():
+    conn = MagicMock()
+    dom_user, dom_plain = MagicMock(), MagicMock()
+    dom_user.XMLDesc.return_value = (
+        "<domain xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>"
+        "<qemu:commandline><qemu:arg value='user,id=n,"
+        "hostfwd=tcp:127.0.0.1:2205-:22'/></qemu:commandline></domain>"
+    )
+    dom_plain.XMLDesc.return_value = "<domain/>"
+    conn.listAllDomains.return_value = [dom_user, dom_plain]
+
+    assert used_ssh_ports(conn) == {2205}
+
+
+def test_ensure_network_active_is_noop_in_user_mode():
+    set_profile(macos_profile())
+    conn = MagicMock()
+
+    ensure_network_active(conn, {"networks": ["default"]})
+
+    conn.networkLookupByName.assert_not_called()
+
+
+def test_teardown_skips_nwfilter_without_nwfilter_support():
+    set_profile(macos_profile())
+    conn = MagicMock()
+    conn.listAllDomains.return_value = []
+    conn.listAllStoragePools.return_value = []
+
+    teardown(conn, {"name": "web-1"})
+
+    conn.listAllNWFilters.assert_not_called()
 
 
 def test_provision_passes_secrets_to_build_seed_iso(monkeypatch, stub_provision_deps):

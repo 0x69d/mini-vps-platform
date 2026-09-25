@@ -1,11 +1,14 @@
+import io
 import xml.etree.ElementTree as ET
-from pathlib import Path
 from unittest.mock import MagicMock
 
+import pycdlib
 import pytest
 import yaml
+from conftest import macos_profile
 
-from mini_vps.config import BALLOON_STATS_PERIOD_SECONDS, POOL_NAME, POOL_XML
+from mini_vps.config import BALLOON_STATS_PERIOD_SECONDS, POOL_NAME, QEMU_XML_NS
+from mini_vps.platform_profile import detect
 from mini_vps.resources import (
     _build_network_config,
     _build_static_routes_fragment,
@@ -13,15 +16,21 @@ from mini_vps.resources import (
     _has_static_network,
     _mac_for_interface,
     _network_name,
+    allocate_ssh_port,
     build_domain_xml,
     build_nwfilter_xml,
     build_seed_iso,
+    build_seed_iso_bytes,
     create_overlay_volume,
     ensure_pool,
+    render_seed_files,
     resize_domain_xml,
     set_domain_filterref_xml,
+    ssh_forward_port,
 )
 from mini_vps.startup_scripts import StartupScriptError
+
+POOL_XML = "<pool type='dir'><name>vps-pool</name></pool>"
 
 
 def _spec(**overrides):
@@ -114,92 +123,88 @@ def test_build_static_routes_fragment_enables_unit_via_runcmd():
 # --- build_domain_xml ---
 
 
+def _domain(spec=None, **kwargs):
+    xml = build_domain_xml(spec or _spec(), "/overlay.qcow2", "/seed.iso", **kwargs)
+    return ET.fromstring(xml)
+
+
 def test_build_domain_xml_converts_memory_to_kib():
-    xml = build_domain_xml(_spec(), "/overlay.qcow2", "/seed.iso")
-    assert "<memory unit='KiB'>1048576</memory>" in xml
+    memory = _domain().find("memory")
+    assert memory.get("unit") == "KiB"
+    assert memory.text == "1048576"
 
 
 def test_build_domain_xml_embeds_paths_and_fields():
     xml = build_domain_xml(_spec(), "/lab/web-1.qcow2", "/lab/web-1-seed.iso")
-    assert "<name>web-1</name>" in xml
-    assert "<vcpu>2</vcpu>" in xml
-    assert "source file='/lab/web-1.qcow2'" in xml
-    assert "source file='/lab/web-1-seed.iso'" in xml
-    assert "source network='default'" in xml
+    root = ET.fromstring(xml)
+    assert root.find("name").text == "web-1"
+    assert root.find("vcpu").text == "2"
+    sources = [d.find("source").get("file") for d in root.findall("devices/disk")]
+    assert sources == ["/lab/web-1.qcow2", "/lab/web-1-seed.iso"]
+    assert root.find("devices/interface/source").get("network") == "default"
 
 
 def test_build_domain_xml_without_filter_omits_filterref():
-    xml = build_domain_xml(_spec(), "/overlay.qcow2", "/seed.iso")
-    assert "filterref" not in xml
+    assert _domain().find("devices/interface/filterref") is None
 
 
 def test_build_domain_xml_with_filter_adds_filterref():
-    xml = build_domain_xml(
-        _spec(), "/overlay.qcow2", "/seed.iso", filter_name="minivps-web-1"
-    )
-    assert "<filterref filter='minivps-web-1'/>" in xml
+    root = _domain(filter_name="minivps-web-1")
+    assert root.find("devices/interface/filterref").get("filter") == "minivps-web-1"
 
 
-def test_build_domain_xml_generates_one_interface_per_network():
-    xml = build_domain_xml(
-        _spec(networks=["seg1", "seg2"]), "/overlay.qcow2", "/seed.iso"
-    )
-    assert xml.count("<interface") == 2
-    assert "source network='seg1'" in xml
-    assert "source network='seg2'" in xml
-
-
-def test_build_domain_xml_multi_nic_output_is_well_formed_xml():
-    # {interfaces} の連結が壊れていないこと(count だけでは検知できない
-    # インデント崩れ・タグの閉じ忘れ等)を ElementTree のパース成否で確認する。
-    xml = build_domain_xml(
-        _spec(networks=["seg1", "seg2"]),
-        "/overlay.qcow2",
-        "/seed.iso",
-        filter_name="minivps-web-1",
-    )
-    root = ET.fromstring(xml)
+def test_build_domain_xml_generates_one_interface_per_network_with_filter():
+    root = _domain(_spec(networks=["seg1", "seg2"]), filter_name="minivps-web-1")
     interfaces = root.findall("devices/interface")
-    assert len(interfaces) == 2
     assert [i.find("source").get("network") for i in interfaces] == ["seg1", "seg2"]
     assert all(i.find("filterref").get("filter") == "minivps-web-1" for i in interfaces)
+    assert all(i.find("model").get("type") == "virtio" for i in interfaces)
 
 
-def test_build_domain_xml_applies_filter_to_all_interfaces():
-    xml = build_domain_xml(
-        _spec(networks=["seg1", "seg2"]),
-        "/overlay.qcow2",
-        "/seed.iso",
-        filter_name="minivps-web-1",
-    )
-    assert xml.count("<filterref filter='minivps-web-1'/>") == 2
+def test_build_domain_xml_uses_kvm_host_model_q35_on_linux_kvm():
+    root = _domain()
+    assert root.get("type") == "kvm"
+    assert root.find("cpu").get("mode") == "host-model"
+    os_type = root.find("os/type")
+    assert (os_type.get("arch"), os_type.get("machine")) == ("x86_64", "q35")
 
 
-def test_build_domain_xml_passes_through_host_cpu_features():
-    xml = build_domain_xml(_spec(), "/overlay.qcow2", "/seed.iso")
-    assert "<cpu mode='host-model'/>" in xml
-
-
-def test_build_domain_xml_uses_uefi_firmware_and_q35_machine():
-    xml = build_domain_xml(_spec(), "/overlay.qcow2", "/seed.iso")
-    assert "<os firmware='efi'>" in xml
-    assert "<loader secure='no'/>" in xml
-    assert "machine='q35'" in xml
+def test_build_domain_xml_uses_uefi_firmware():
+    root = _domain()
+    assert root.find("os").get("firmware") == "efi"
+    assert root.find("os/loader").get("secure") == "no"
 
 
 def test_build_domain_xml_includes_rng_clock_pm_and_discard():
-    xml = build_domain_xml(_spec(), "/overlay.qcow2", "/seed.iso")
-    assert "<rng model='virtio'>" in xml
-    assert "<clock offset='utc'/>" in xml
-    assert "<suspend-to-mem enabled='no'/>" in xml
-    assert "<suspend-to-disk enabled='no'/>" in xml
-    assert "discard='unmap'" in xml
+    root = _domain()
+    assert root.find("devices/rng").get("model") == "virtio"
+    assert root.find("clock").get("offset") == "utc"
+    assert root.find("pm/suspend-to-mem").get("enabled") == "no"
+    assert root.find("pm/suspend-to-disk").get("enabled") == "no"
+    assert root.find("devices/disk/driver").get("discard") == "unmap"
+
+
+def test_build_domain_xml_uses_direct_io_on_linux():
+    driver = _domain().find("devices/disk/driver")
+    assert (driver.get("cache"), driver.get("io")) == ("none", "native")
 
 
 def test_build_domain_xml_enables_memballoon_stats_period():
-    xml = build_domain_xml(_spec(), "/overlay.qcow2", "/seed.iso")
-    assert "<memballoon model='virtio'>" in xml
-    assert f"<stats period='{BALLOON_STATS_PERIOD_SECONDS}'/>" in xml
+    stats = _domain().find("devices/memballoon/stats")
+    assert stats.get("period") == str(BALLOON_STATS_PERIOD_SECONDS)
+
+
+def test_build_domain_xml_adds_guest_agent_channel():
+    channel = _domain().find("devices/channel")
+    assert channel.get("type") == "unix"
+    assert channel.find("target").get("name") == "org.qemu.guest_agent.0"
+
+
+def test_build_domain_xml_attaches_seed_as_sata_cdrom_on_x86():
+    seed = _domain().findall("devices/disk")[1]
+    assert seed.get("device") == "cdrom"
+    assert seed.find("target").get("bus") == "sata"
+    assert seed.find("readonly") is not None
 
 
 def test_build_domain_xml_requires_networks_key():
@@ -210,14 +215,81 @@ def test_build_domain_xml_requires_networks_key():
 
 
 def test_build_domain_xml_embeds_deterministic_mac_per_interface():
+    root = _domain(_spec(networks=["seg1", "seg2"]))
+    macs = [i.find("mac").get("address") for i in root.findall("devices/interface")]
+    assert macs == [_mac_for_interface("web-1", 0), _mac_for_interface("web-1", 1)]
+
+
+def test_build_domain_xml_uses_qemu_tcg_with_maximum_cpu_without_kvm():
+    profile = detect(system="Linux", machine="x86_64", env={}, kvm_available=False)
+    root = _domain(profile=profile)
+    assert root.get("type") == "qemu"
+    assert root.find("cpu").get("mode") == "maximum"
+
+
+def test_build_domain_xml_on_macos_uses_hvf_aarch64_virt():
+    root = _domain(profile=macos_profile(), ssh_port=2201)
+    assert root.get("type") == "hvf"
+    assert root.find("cpu").get("mode") == "host-passthrough"
+    os_type = root.find("os/type")
+    assert (os_type.get("arch"), os_type.get("machine")) == ("aarch64", "virt")
+    # io='native' は Linux 専用なので付けない
+    driver = root.find("devices/disk/driver")
+    assert driver.get("io") is None
+    assert driver.get("cache") is None
+
+
+def test_build_domain_xml_on_aarch64_attaches_seed_as_readonly_virtio_disk():
+    root = _domain(profile=macos_profile(), ssh_port=2201)
+    seed = root.findall("devices/disk")[1]
+    assert seed.get("device") == "disk"
+    assert seed.find("target").get("bus") == "virtio"
+    assert seed.find("readonly") is not None
+
+
+def test_build_domain_xml_user_mode_forwards_ssh_via_qemu_commandline():
     xml = build_domain_xml(
-        _spec(networks=["seg1", "seg2"]), "/overlay.qcow2", "/seed.iso"
+        _spec(), "/o.qcow2", "/s.iso", profile=macos_profile(), ssh_port=2207
     )
-    mac0 = _mac_for_interface("web-1", 0)
-    mac1 = _mac_for_interface("web-1", 1)
-    assert mac0 != mac1
-    assert f"<mac address='{mac0}'/>" in xml
-    assert f"<mac address='{mac1}'/>" in xml
+    root = ET.fromstring(xml)
+    assert root.findall("devices/interface") == []
+    args = [a.get("value") for a in root.iter(f"{{{QEMU_XML_NS}}}arg")]
+    assert args[0] == "-netdev"
+    assert "hostfwd=tcp:127.0.0.1:2207-:22" in args[1]
+    assert f"mac={_mac_for_interface('web-1', 0)}" in args[3]
+    assert ssh_forward_port(xml) == 2207
+
+
+def test_build_domain_xml_user_mode_requires_ssh_port():
+    with pytest.raises(ValueError):
+        build_domain_xml(_spec(), "/o.qcow2", "/s.iso", profile=macos_profile())
+
+
+def test_ssh_forward_port_is_none_for_libvirt_networking():
+    xml = build_domain_xml(_spec(), "/o.qcow2", "/s.iso")
+    assert ssh_forward_port(xml) is None
+
+
+def test_ssh_forward_port_survives_resize_roundtrip():
+    xml = build_domain_xml(
+        _spec(), "/o.qcow2", "/s.iso", profile=macos_profile(), ssh_port=2210
+    )
+    resized = resize_domain_xml(xml, 2048 * 1024, 4)
+    assert ssh_forward_port(resized) == 2210
+    assert "qemu:commandline" in resized
+
+
+# --- allocate_ssh_port ---
+
+
+def test_allocate_ssh_port_skips_used_and_busy_ports():
+    port = allocate_ssh_port({2201}, (2201, 2205), is_free=lambda p: p != 2202)
+    assert port == 2203
+
+
+def test_allocate_ssh_port_raises_when_exhausted():
+    with pytest.raises(RuntimeError):
+        allocate_ssh_port({2201, 2202}, (2201, 2202), is_free=lambda p: True)
 
 
 # --- _mac_for_interface / _network_name / _has_static_network ---
@@ -588,6 +660,121 @@ def test_create_overlay_volume_skips_delete_when_absent(monkeypatch):
     pool.createXML.assert_called_once()
 
 
+# --- render_seed_files / build_seed_iso_bytes ---
+
+
+def _read_iso(iso_bytes):
+    """Seed ISO を pycdlib で読み戻し、(ラベル, {Rock Ridge 名: 中身}) を返す。"""
+    iso = pycdlib.PyCdlib()
+    iso.open_fp(io.BytesIO(iso_bytes))
+    label = iso.pvd.volume_identifier.decode().strip()
+    files = {}
+    for child in iso.list_children(rr_path="/"):
+        if child.is_dot() or child.is_dotdot():
+            continue
+        name = child.rock_ridge.name().decode()
+        out = io.BytesIO()
+        iso.get_file_from_iso_fp(out, rr_path=f"/{name}")
+        files[name] = out.getvalue()
+    iso.close()
+    return label, files
+
+
+def _user_data(files):
+    text = files["user-data"].decode()
+    assert text.startswith("#cloud-config\n")
+    return yaml.safe_load(text)
+
+
+def test_build_seed_iso_bytes_has_cidata_label_and_long_names():
+    files = {"user-data": b"#cloud-config\n", "meta-data": b"instance-id: x\n"}
+    label, read_back = _read_iso(build_seed_iso_bytes(files))
+    assert label == "cidata"
+    assert read_back == files
+
+
+def test_render_seed_files_contains_pubkey_and_hostname():
+    files = render_seed_files(_spec(), "ssh-ed25519 AAAA...")
+    assert set(files) == {"user-data", "meta-data"}
+    user_data = _user_data(files)
+    assert user_data["users"][0]["ssh_authorized_keys"] == ["ssh-ed25519 AAAA..."]
+    assert b"local-hostname: web-1" in files["meta-data"]
+
+
+def test_render_seed_files_installs_and_starts_guest_agent():
+    user_data = _user_data(render_seed_files(_spec(), "k"))
+    assert user_data["packages"] == ["qemu-guest-agent"]
+    assert "qemu-guest-agent" in " ".join(user_data["runcmd"][0])
+
+
+def test_render_seed_files_omits_write_files_when_no_startup_script():
+    user_data = _user_data(render_seed_files(_spec(), "k"))
+    assert "write_files" not in user_data
+    assert len(user_data["runcmd"]) == 1  # guest agent の起動のみ
+
+
+def test_render_seed_files_includes_startup_script_with_secrets():
+    spec = _spec(startup_script="opencode-sakura-ai-engine")
+    files = render_seed_files(spec, "k", secrets={"AI_ENGINE_TOKEN": "sk-abc"})
+    user_data = _user_data(files)
+    assert "write_files" in user_data
+    assert b"sk-abc" in files["user-data"]
+
+
+def test_render_seed_files_includes_static_routes_unit():
+    spec = _spec(
+        static_routes=[{"destination": "192.168.202.0/24", "via": "192.168.201.1"}]
+    )
+    files = render_seed_files(spec, "k")
+    assert b"minivps-static-routes.service" in files["user-data"]
+    assert b"192.168.202.0/24" in files["user-data"]
+
+
+def test_render_seed_files_combines_startup_script_and_static_routes():
+    spec = _spec(
+        startup_script="opencode-sakura-ai-engine",
+        static_routes=[{"destination": "192.168.202.0/24", "via": "192.168.201.1"}],
+    )
+    files = render_seed_files(spec, "k", secrets={"AI_ENGINE_TOKEN": "sk-abc"})
+    user_data = _user_data(files)
+    assert len(user_data["write_files"]) == 3  # opencode 2件 + static-routes 1件
+    # guest agent 1件 + opencode 7件 + static-routes 2件
+    assert len(user_data["runcmd"]) == 10
+
+
+def test_render_seed_files_raises_on_missing_secret():
+    spec = _spec(startup_script="opencode-sakura-ai-engine")
+    with pytest.raises(StartupScriptError):
+        render_seed_files(spec, "k", secrets=None)
+
+
+def test_render_seed_files_omits_network_config_when_all_dhcp():
+    assert "network-config" not in render_seed_files(_spec(), "k")
+
+
+def test_render_seed_files_network_config_covers_all_nics_when_static_present():
+    spec = _spec(
+        networks=[
+            "default",
+            {
+                "name": "seg1",
+                "address": "192.168.201.10/24",
+                "nameservers": ["192.168.203.30"],
+                "search": ["minivps.internal"],
+            },
+        ],
+    )
+    files = render_seed_files(spec, "k")
+    config = yaml.safe_load(files["network-config"])
+    assert config == _build_network_config(spec)
+    ethernets = config["network"]["ethernets"]
+    assert ethernets["eth0"]["dhcp4"] is True
+    assert ethernets["eth1"]["nameservers"] == {
+        "addresses": ["192.168.203.30"],
+        "search": ["minivps.internal"],
+    }
+
+
 # --- build_seed_iso (Mock) ---
 
 
@@ -605,266 +792,76 @@ def _seed_pool_mock(monkeypatch, existing_names=()):
     return pool
 
 
-def _fake_run_writes_dummy_iso(cmd, check):
-    # subprocess.run はまだ一時ディレクトリが存在するタイミングで呼ばれるため、
-    # ここで書き出さないと with ブロックを抜けた時点でファイルごと削除されてしまう。
-    # cmd の末尾3要素は常に output/user-data/meta-data(-N の有無に依存しない)。
-    Path(cmd[-3]).write_bytes(b"dummy-iso-bytes")
-
-
-def test_build_seed_iso_writes_expected_cloud_init_content(monkeypatch):
-    captured = {}
-
-    def fake_run(cmd, check):
-        captured["user_data"] = Path(cmd[2]).read_text()
-        captured["meta_data"] = Path(cmd[3]).read_text()
-        captured["cmd"] = cmd
-        _fake_run_writes_dummy_iso(cmd, check)
-
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
+def _stream_conn():
+    """送られたバイト列を記録する stream を返す libvirt 接続の Mock。"""
     conn = MagicMock()
+    sent = bytearray()
+    stream = conn.newStream.return_value
+
+    def _send(data):
+        sent.extend(data)
+        return len(data)
+
+    stream.send.side_effect = _send
+    return conn, sent
+
+
+def test_build_seed_iso_uploads_iso_and_returns_path(monkeypatch):
+    conn, sent = _stream_conn()
     pool = _seed_pool_mock(monkeypatch)
 
-    spec = _spec(name="web-1", hostname="web-1", user="ubuntu")
-    seed_path = build_seed_iso(conn, spec, "ssh-ed25519 AAAA...")
+    path = build_seed_iso(conn, _spec(), "ssh-ed25519 AAAA...")
 
-    assert captured["cmd"][0] == "cloud-localds"
-    assert "ssh-ed25519 AAAA..." in captured["user_data"]
-    assert "web-1" in captured["meta_data"]
-    assert seed_path == pool.createXML.return_value.path.return_value
+    assert path == "/seeds/web-1-seed.iso"
+    label, files = _read_iso(bytes(sent))
+    assert label == "cidata"
+    assert b"ssh-ed25519 AAAA..." in files["user-data"]
+    # capacity と upload 長は ISO の実サイズに一致する
+    vol_xml = pool.createXML.call_args.args[0]
+    assert f"<capacity unit='bytes'>{len(sent)}</capacity>" in vol_xml
+    pool.createXML.return_value.upload.assert_called_once_with(
+        conn.newStream.return_value, 0, len(sent), 0
+    )
+    conn.newStream.return_value.finish.assert_called_once()
 
 
 def test_build_seed_iso_deletes_existing_seed_before_recreate(monkeypatch):
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", _fake_run_writes_dummy_iso)
-    conn = MagicMock()
+    conn, _ = _stream_conn()
     pool = _seed_pool_mock(monkeypatch, existing_names=["web-1-seed.iso"])
 
-    build_seed_iso(conn, _spec(name="web-1"), "ssh-ed25519 AAAA...")
+    build_seed_iso(conn, _spec(), "k")
 
     pool.storageVolLookupByName.assert_called_once_with("web-1-seed.iso")
     pool.storageVolLookupByName.return_value.delete.assert_called_once_with(0)
 
 
 def test_build_seed_iso_skips_delete_when_seed_absent(monkeypatch):
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", _fake_run_writes_dummy_iso)
-    conn = MagicMock()
+    conn, _ = _stream_conn()
     pool = _seed_pool_mock(monkeypatch)
 
-    build_seed_iso(conn, _spec(name="web-1"), "ssh-ed25519 AAAA...")
+    build_seed_iso(conn, _spec(), "k")
 
     pool.storageVolLookupByName.assert_not_called()
 
 
-def test_build_seed_iso_omits_write_files_when_no_startup_script(monkeypatch):
-    captured = {}
-
-    def fake_run(cmd, check):
-        captured["user_data"] = Path(cmd[2]).read_text()
-        _fake_run_writes_dummy_iso(cmd, check)
-
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
+def test_build_seed_iso_aborts_stream_on_send_failure(monkeypatch):
     conn = MagicMock()
+    conn.newStream.return_value.send.side_effect = OSError("broken pipe")
     _seed_pool_mock(monkeypatch)
 
-    build_seed_iso(conn, _spec(name="web-1"), "ssh-ed25519 AAAA...")
+    with pytest.raises(OSError):
+        build_seed_iso(conn, _spec(), "k")
 
-    parsed = yaml.safe_load(captured["user_data"])
-    assert "write_files" not in parsed
-    assert "runcmd" not in parsed
+    conn.newStream.return_value.abort.assert_called_once()
+    conn.newStream.return_value.finish.assert_not_called()
 
 
-def test_build_seed_iso_includes_write_files_and_runcmd_when_startup_script_set(
-    monkeypatch,
-):
-    captured = {}
-
-    def fake_run(cmd, check):
-        captured["user_data"] = Path(cmd[2]).read_text()
-        _fake_run_writes_dummy_iso(cmd, check)
-
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
+def test_build_seed_iso_fails_before_touching_pool_on_missing_secret(monkeypatch):
     conn = MagicMock()
-    _seed_pool_mock(monkeypatch)
-
-    spec = _spec(name="web-1", startup_script="opencode-sakura-ai-engine")
-    build_seed_iso(
-        conn, spec, "ssh-ed25519 AAAA...", secrets={"AI_ENGINE_TOKEN": "sk-abc"}
-    )
-
-    parsed = yaml.safe_load(captured["user_data"])
-    assert "write_files" in parsed
-    assert "runcmd" in parsed
-    assert "sk-abc" in captured["user_data"]
-
-
-def test_build_seed_iso_includes_static_routes_unit_when_set(monkeypatch):
-    captured = {}
-
-    def fake_run(cmd, check):
-        captured["user_data"] = Path(cmd[2]).read_text()
-        _fake_run_writes_dummy_iso(cmd, check)
-
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
-    conn = MagicMock()
-    _seed_pool_mock(monkeypatch)
-
-    spec = _spec(
-        name="web-1",
-        static_routes=[{"destination": "192.168.202.0/24", "via": "192.168.201.1"}],
-    )
-    build_seed_iso(conn, spec, "ssh-ed25519 AAAA...")
-
-    parsed = yaml.safe_load(captured["user_data"])
-    assert "write_files" in parsed
-    assert "runcmd" in parsed
-    assert "minivps-static-routes.service" in captured["user_data"]
-    assert "192.168.202.0/24" in captured["user_data"]
-
-
-def test_build_seed_iso_combines_startup_script_and_static_routes(monkeypatch):
-    captured = {}
-
-    def fake_run(cmd, check):
-        captured["user_data"] = Path(cmd[2]).read_text()
-        _fake_run_writes_dummy_iso(cmd, check)
-
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
-    conn = MagicMock()
-    _seed_pool_mock(monkeypatch)
-
-    spec = _spec(
-        name="web-1",
-        startup_script="opencode-sakura-ai-engine",
-        static_routes=[{"destination": "192.168.202.0/24", "via": "192.168.201.1"}],
-    )
-    build_seed_iso(
-        conn, spec, "ssh-ed25519 AAAA...", secrets={"AI_ENGINE_TOKEN": "sk-abc"}
-    )
-
-    parsed = yaml.safe_load(captured["user_data"])
-    # 両方のフラグメントが連結されて write_files/runcmd に入っていること
-    assert len(parsed["write_files"]) == 3  # opencode 2件 + static-routes 1件
-    assert len(parsed["runcmd"]) == 9  # opencode 7件 + static-routes 2件
-    assert "sk-abc" in captured["user_data"]
-    assert "minivps-static-routes.service" in captured["user_data"]
-
-
-def test_build_seed_iso_propagates_missing_secret_error_before_cloud_localds(
-    monkeypatch,
-):
-    run_mock = MagicMock()
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", run_mock)
-    conn = MagicMock()
-    _seed_pool_mock(monkeypatch)
-
-    spec = _spec(name="web-1", startup_script="opencode-sakura-ai-engine")
+    pool = _seed_pool_mock(monkeypatch)
+    spec = _spec(startup_script="opencode-sakura-ai-engine")
 
     with pytest.raises(StartupScriptError):
-        build_seed_iso(conn, spec, "ssh-ed25519 AAAA...", secrets=None)
+        build_seed_iso(conn, spec, "k", secrets=None)
 
-    # secrets 不足を検知した時点で失敗するため、cloud-localds は一切呼ばれない
-    run_mock.assert_not_called()
-
-
-# --- build_seed_iso: network-config(-N) ---
-
-
-def test_build_seed_iso_omits_dash_n_when_all_networks_are_dhcp(monkeypatch):
-    captured = {}
-
-    def fake_run(cmd, check):
-        captured["cmd"] = cmd
-        _fake_run_writes_dummy_iso(cmd, check)
-
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
-    conn = MagicMock()
-    _seed_pool_mock(monkeypatch)
-
-    build_seed_iso(conn, _spec(networks=["default"]), "ssh-ed25519 AAAA...")
-
-    assert "-N" not in captured["cmd"]
-    assert len(captured["cmd"]) == 4
-
-
-def test_build_seed_iso_passes_dash_n_and_network_config_when_static_present(
-    monkeypatch,
-):
-    captured = {}
-
-    def fake_run(cmd, check):
-        captured["cmd"] = cmd
-        nc_index = cmd.index("-N") + 1
-        captured["network_config"] = yaml.safe_load(Path(cmd[nc_index]).read_text())
-        _fake_run_writes_dummy_iso(cmd, check)
-
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
-    conn = MagicMock()
-    _seed_pool_mock(monkeypatch)
-
-    spec = _spec(
-        name="web-1",
-        networks=[{"name": "seg1", "address": "192.168.201.10/24"}],
-    )
-    build_seed_iso(conn, spec, "ssh-ed25519 AAAA...")
-
-    assert "-N" in captured["cmd"]
-    # output/user-data/meta-data は -N があっても常に末尾3要素であること
-    assert captured["cmd"][0] == "cloud-localds"
-    assert len(captured["cmd"]) == 6
-    assert captured["network_config"] == _build_network_config(spec)
-
-
-def test_build_seed_iso_network_config_covers_all_nics_including_dhcp(monkeypatch):
-    captured = {}
-
-    def fake_run(cmd, check):
-        nc_index = cmd.index("-N") + 1
-        captured["network_config"] = yaml.safe_load(Path(cmd[nc_index]).read_text())
-        _fake_run_writes_dummy_iso(cmd, check)
-
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
-    conn = MagicMock()
-    _seed_pool_mock(monkeypatch)
-
-    spec = _spec(
-        name="web-1",
-        networks=["default", {"name": "seg1", "address": "192.168.201.10/24"}],
-    )
-    build_seed_iso(conn, spec, "ssh-ed25519 AAAA...")
-
-    ethernets = captured["network_config"]["network"]["ethernets"]
-    assert len(ethernets) == 2
-    assert ethernets["eth0"]["dhcp4"] is True
-    assert ethernets["eth1"]["addresses"] == ["192.168.201.10/24"]
-
-
-def test_build_seed_iso_network_config_contains_nameservers(monkeypatch):
-    captured = {}
-
-    def fake_run(cmd, check):
-        nc_index = cmd.index("-N") + 1
-        captured["network_config"] = yaml.safe_load(Path(cmd[nc_index]).read_text())
-        _fake_run_writes_dummy_iso(cmd, check)
-
-    monkeypatch.setattr("mini_vps.resources.subprocess.run", fake_run)
-    conn = MagicMock()
-    _seed_pool_mock(monkeypatch)
-
-    spec = _spec(
-        name="web-1",
-        networks=[
-            {
-                "name": "seg1",
-                "address": "192.168.201.10/24",
-                "nameservers": ["192.168.203.30"],
-                "search": ["minivps.internal"],
-            }
-        ],
-    )
-    build_seed_iso(conn, spec, "ssh-ed25519 AAAA...")
-
-    entry = captured["network_config"]["network"]["ethernets"]["eth0"]
-    assert entry["nameservers"] == {
-        "addresses": ["192.168.203.30"],
-        "search": ["minivps.internal"],
-    }
+    pool.createXML.assert_not_called()

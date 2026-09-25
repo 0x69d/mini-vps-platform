@@ -16,16 +16,10 @@ import typer
 import yaml
 from pydantic import ValidationError
 
-from .config import LIBVIRT_URI
+from . import errors
 from .logging_config import configure as configure_logging
-from .manager import (
-    ServerConflict,
-    ServerManager,
-    ServerNotFound,
-    ServerNotRunning,
-    ServerRunning,
-    register_quiet_error_handler,
-)
+from .manager import ServerManager, register_quiet_error_handler
+from .platform_profile import get_profile
 from .spec import load_spec
 from .startup_scripts import StartupScriptError
 
@@ -86,7 +80,7 @@ def _open_manager():
         ServerManager。
     """
     register_quiet_error_handler()
-    conn = libvirt.open(LIBVIRT_URI)
+    conn = libvirt.open(get_profile().libvirt_uri)
     try:
         yield ServerManager(conn)
     finally:
@@ -128,7 +122,7 @@ def _run_command(func):
     「HTTP ステータス」ではなく「終了コード」へ変換する。引数不足など
     純粋な Typer の使用法エラーはここでは扱わず、Typer の既定動作
     (終了コード 2, Usage 表示)に委ねる。1 は入力(spec ファイル・
-    --startup-param)の誤り、3 以降は VM の状態に起因する拒否に割り当てる。
+    --startup-param)の誤り。管理層の例外の終了コードは errors.ERROR_TABLE が決める。
     """
 
     @functools.wraps(func)
@@ -138,18 +132,12 @@ def _run_command(func):
             with factory() as mgr:
                 ctx.obj = mgr
                 result = func(ctx, *args, **kwargs)
-        except ServerNotFound as e:
-            print(f"error: server not found: {e}", file=sys.stderr)
-            raise typer.Exit(code=3) from None
-        except ServerConflict as e:
-            print(f"error: server conflict: {e}", file=sys.stderr)
-            raise typer.Exit(code=4) from None
-        except ServerNotRunning as e:
-            print(f"error: server not running: {e}", file=sys.stderr)
-            raise typer.Exit(code=5) from None
-        except ServerRunning as e:
-            print(f"error: server running: {e}", file=sys.stderr)
-            raise typer.Exit(code=6) from None
+        except errors.MiniVpsError as e:
+            mapping = errors.lookup(e)
+            if mapping is None:
+                raise
+            print(f"error: {mapping.label}: {e}", file=sys.stderr)
+            raise typer.Exit(code=mapping.exit_code) from None
         except libvirt.libvirtError as e:
             # register_quiet_error_handler() が libvirt 自身の stderr を抑止するため、
             # ここで出さないと libvirtd 停止時に traceback だけが残る。

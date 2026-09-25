@@ -14,9 +14,9 @@ import libvirt
 from prometheus_client import REGISTRY, start_http_server
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
-from .config import LIBVIRT_URI
 from .logging_config import configure as configure_logging
 from .manager import STATE_NAMES, ServerManager, register_quiet_error_handler
+from .platform_profile import get_profile
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,8 +88,8 @@ def _parse_domain_stats(raw: dict) -> dict:
 
 
 def _default_manager_factory() -> ServerManager:
-    """既定の接続先(LIBVIRT_URI)に接続した ServerManager を生成する。"""
-    return ServerManager(libvirt.open(LIBVIRT_URI))
+    """既定の接続先(HostProfile.libvirt_uri)に接続した ServerManager を生成する。"""
+    return ServerManager(libvirt.open(get_profile().libvirt_uri))
 
 
 class DomainCollector:

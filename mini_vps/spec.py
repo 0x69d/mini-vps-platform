@@ -129,6 +129,8 @@ class ServerSpecInput(BaseModel):
     # 初回起動時に適用する cloud-init テンプレート名。非秘匿のため metadata への
     # 永続化を許容する(秘密情報は別途 secrets 引数で渡し、ここには含めない)。
     startup_script: str | None = None
+    # ホスト(libvirt)の起動時に VM も起動するか。稼働中でも反映できる。
+    autostart: bool = True
 
     @model_validator(mode="after")
     def _validate_networks_unique(self) -> ServerSpecInput:

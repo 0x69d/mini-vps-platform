@@ -6,7 +6,6 @@ get / list を成立させる。各メソッドは lifecycle の実行部品の�
 
 import contextlib
 import logging
-import threading
 import xml.etree.ElementTree as ET
 
 import libvirt
@@ -14,7 +13,17 @@ import yaml
 
 from . import dns_registration
 from .config import METADATA_KEY, METADATA_NS
+from .errors import (  # noqa: F401  (manager から import する既存コード向けの再エクスポート)
+    PlatformUnsupported,
+    ServerConflict,
+    ServerNotFound,
+    ServerNotRunning,
+    ServerRunning,
+)
 from .lifecycle import _lease_ipv4, ensure_network_active, provision, teardown
+from .locks import NameLocks
+from .planning import Action, check_platform, plan_change
+from .platform_profile import get_profile
 from .resources import (
     _filter_name,
     build_nwfilter_xml,
@@ -26,16 +35,6 @@ from .resources import (
 from .spec import ServerSpec, read_pubkey
 
 _LOGGER = logging.getLogger(__name__)
-
-# create() が停止中の既存 VM に対して収束(defineXML の最小差分編集)を許す
-# フィールド。それ以外のフィールドの差分は ServerConflict で拒否する。
-# networks はインターフェース XML の書き換えだけなら技術的には可能だが、
-# 実運用への影響が大きいためスコープ外とし、明示的に別操作として扱う。
-# static_routes は cloud-init 由来(seed ISO 生成時にのみ反映)であり、
-# _converge() は domain XML の差分編集のみで seed ISO を作り直さないため、
-# mutable に含めても実際には反映されない(startup_script と同じ制約)。
-# 新しい可変フィールドを追加する場合はここに追記する。
-_MUTABLE_FIELDS = frozenset({"memory", "vcpus", "filters"})
 
 STATE_NAMES = {
     libvirt.VIR_DOMAIN_NOSTATE: "nostate",
@@ -99,42 +98,6 @@ def _read_spec(dom) -> dict:
     """VM スペックを dom の <metadata> から読み戻す(未保有なら libvirtError)。"""
     raw = dom.metadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, METADATA_NS, 0)
     return yaml.safe_load(ET.fromstring(raw).text)
-
-
-class ServerNotFound(Exception):
-    """指定した name の管理対象 domain が存在しない、または管理対象外であることを表す。
-
-    呼び出し側はこの 1 つの例外を捕捉すれば、libvirt のエラーコードを意識せずに
-    「minivps が知らない name」を扱える(例: ルーターで 404 に変換する)。
-    """
-
-
-class ServerConflict(Exception):
-    """create() の対象 name が既存実体と相違する(または管理対象外)ことを表す。
-
-    収束ロジックを持たないため相違は fail-loud に拒否する。ServerNotFound と対称で、
-    Web API では PUT /servers/{name} の 409 Conflict に対応づける。
-    """
-
-
-class ServerNotRunning(Exception):
-    """restart(force=False) の対象 VM が停止中であることを表す。
-
-    ACPI 経由の正常再起動は稼働中のゲスト OS にしか要求できない。libvirt の
-    生の例外を伝播させる代わりにこの例外で fail-loud に拒否することで、
-    ServerNotFound/ServerConflict と同様に CLI の終了コード・Web API の
-    HTTP ステータスへ正規化できるようにする(起動も含めた強制再起動は
-    force=True で行う)。
-    """
-
-
-class ServerRunning(Exception):
-    """create() が可変フィールド差分を収束させる対象 VM が起動中であることを表す。
-
-    稼働中の memory/vcpus/filters 変更はホットプラグ対応(スコープ外)が必要なため、
-    ServerNotRunning と対称的に fail-loud に拒否する。先に stop してから
-    再度 create/PUT する運用を促す。
-    """
 
 
 def _lookup(conn, name: str):
@@ -215,7 +178,9 @@ class ServerManager:
     """VM の作成・取得・一覧・削除を行う管理層。
 
     書き込み系操作(create/delete/start/stop/restart/reinstall)は name 単位ロックで
-    直列化し、同名への並行収束(check-then-act)の TOCTOU を防ぐ。
+    直列化し、同名への並行収束(check-then-act)の TOCTOU を防ぐ。ロックは
+    プロセス間(fcntl.flock)でも効くため、CLI と API が別プロセスでも直列化される
+    (locks.py 参照)。
     別 name 同士は並行のまま。get / list / status は libvirt 接続が個々の
     呼び出し単位でスレッドセーフなためロックを取らない。create() はロック内で
     self.get() を呼ぶので、読み取り側にロックを足すと非再帰 Lock で自己デッドロック
@@ -225,49 +190,39 @@ class ServerManager:
         conn: libvirt 接続オブジェクト。
     """
 
-    def __init__(self, conn):
-        self.conn = conn
-        self._locks: dict[str, threading.Lock] = {}
-        self._locks_guard = threading.Lock()
+    def __init__(self, conn, lock_dir: str | None = None):
+        """ServerManager を作る。
 
-    def _lock_for(self, name: str) -> threading.Lock:
-        """指定 name 専用の Lock を返す(無ければ生成する)。
-
-        dict.setdefault は CPython では実質アトミックだが、意図を明示するため
-        _locks_guard で囲んで新規 name の Lock 生成を確実に直列化する。
+        Args:
+            conn: libvirt 接続。
+            lock_dir: name 単位のプロセス間ロックを置くディレクトリ。None なら
+                HostProfile.lock_dir を使う。
         """
-        with self._locks_guard:
-            return self._locks.setdefault(name, threading.Lock())
+        self.conn = conn
+        self._locks = NameLocks(lock_dir or get_profile().lock_dir)
 
     @contextlib.contextmanager
     def _locked(self, name: str):
-        """指定 name のロックを取得し、待たされた場合はその事実を DEBUG に残す。
-
-        まず非ブロッキングで試し、取れなければ待ち始める旨を出してからブロッキングで
-        取り直す。待ち行列に入る前に他スレッドが割り込みうるが、直列化される結果は
-        blocking な acquire() 1回と変わらない。ログのためだけの2段構えである。
+        """指定 name のロック(プロセス内 + プロセス間)を取得して保持する。
 
         Yields:
             None。
         """
-        lock = self._lock_for(name)
-        if not lock.acquire(blocking=False):
-            _LOGGER.debug("%s: ロック待ち", name)
-            lock.acquire()
-        try:
+        with self._locks.hold(name):
             yield
-        finally:
-            lock.release()
 
     def create(
         self, spec: dict, secrets: dict[str, str] | None = None
     ) -> tuple[dict, bool]:
         """VM を宣言的に作成/収束し、(spec と状態, 新規作成か) を返す。
 
-        既存と spec が完全一致すれば無変更で現状を返す(冪等 no-op)。相違がある場合、
-        差分が _MUTABLE_FIELDS(memory/vcpus/filters)に収まっていれば停止中の domain
-        に限り収束させる(稼働中は ServerRunning で拒否)。それ以外のフィールドの
-        差分、または管理対象外の同名 domain は破壊せず ServerConflict で拒否する。
+        既存と spec が完全一致すれば無変更で現状を返す(冪等 no-op)。相違がある場合は
+        planning.plan_change でフィールドごとの反映方式を判定する。稼働中に反映できる
+        差分(autostart)はその場で、停止中にしか反映できない差分(memory/vcpus/
+        filters)は停止中の domain に限り収束させる(稼働中は ServerRunning)。
+        再作成が必要な差分、または管理対象外の同名 domain は破壊せず
+        ServerConflict で拒否する。このホストで実現できない機能(macOS での filters
+        など)はロックを取る前に PlatformUnsupported で拒否する。
         新規作成時は metadata を起動前に付け、失敗時は teardown で巻き戻して
         all-or-nothing にする。
 
@@ -288,9 +243,11 @@ class ServerManager:
 
         Raises:
             ServerConflict: 不変フィールドの差分、または管理対象外の同名 domain の場合。
-            ServerRunning: 可変フィールドの差分があり、対象 VM が起動中の場合。
+            ServerRunning: 停止中にしか反映できない差分があり、対象 VM が起動中の場合。
+            PlatformUnsupported: このホストで実現できない機能が指定された場合。
         """
         name = spec["name"]
+        check_platform(spec, get_profile())
         with self._locked(name):
             existing = _find_domain(self.conn, name)
             if existing is None:
@@ -317,26 +274,34 @@ class ServerManager:
             # (例: nameservers 追加前に作った VM)。Pydantic を通して欠落フィールドに
             # デフォルトを補完し、同じ YAML の再 create が差分扱いにならないようにする。
             old_spec = ServerSpec(**_read_spec(existing)).model_dump()
-            if old_spec == spec:
+            change = plan_change(old_spec, spec, running=bool(existing.isActive()))
+            if change.action is Action.NOOP:
                 _LOGGER.info("%s: 既存と一致、変更なし", name)
                 return self.get(name), False
+            if change.action is Action.CONFLICT:
+                raise ServerConflict(
+                    f"{name} (再作成が必要なフィールド: {sorted(change.recreate_keys)})"
+                )
+            if change.action is Action.BLOCKED_RUNNING:
+                raise ServerRunning(
+                    f"{name} (停止中にしか反映できないフィールド: "
+                    f"{sorted(change.offline_keys)})"
+                )
 
-            diff_keys = {k for k, v in spec.items() if old_spec.get(k) != v}
-            if diff_keys - _MUTABLE_FIELDS:
-                raise ServerConflict(name)
-            if existing.isActive():
-                raise ServerRunning(name)
-
-            _LOGGER.info("%s: 差分を収束 fields=%s", name, sorted(diff_keys))
-            dom = self._converge(existing, old_spec, spec, diff_keys)
+            _LOGGER.info("%s: 差分を収束 fields=%s", name, sorted(change.diff_keys))
+            dom = self._converge(existing, old_spec, spec, set(change.diff_keys))
             # _write_spec が失敗しても domain 実体側はロールバックしない。_converge の
-            # 各操作(resize/filterref 設定/nwfilter 定義・削除)は全遷移パターンで冪等
-            # なため、同じ spec で create() を再実行すれば自己修復する。
+            # 各操作(resize/filterref 設定/nwfilter 定義・削除/autostart)は全遷移
+            # パターンで冪等なため、同じ spec で create() を再実行すれば自己修復する。
             _write_spec(dom, spec)
             return self.get(name), False
 
     def _converge(self, dom, old_spec: dict, new_spec: dict, diff_keys: set) -> object:
-        """可変フィールド(memory/vcpus/filters)の差分を、停止中の domain に適用する。
+        """可変フィールドの差分を domain に適用する。
+
+        反映方式は planning.FIELD_APPLY_MODES が決める。autostart は稼働中でも
+        setAutostart で反映する。memory/vcpus/filters は停止中の domain にだけ適用する
+        (稼働中なら呼び出し前に ServerRunning で拒否済み)。
 
         dom.XMLDesc(INACTIVE) を最小差分編集して defineXML する。build_domain_xml に
         よるテンプレート再構築ではなく既存定義への差分編集にすることで、MAC アドレス・
@@ -352,6 +317,11 @@ class ServerManager:
             defineXML 後の domain(filters/memory/vcpus のいずれの差分も無ければ
             引数の dom をそのまま返す)。
         """
+        if "autostart" in diff_keys:
+            dom.setAutostart(1 if new_spec.get("autostart", True) else 0)
+        if not diff_keys & {"memory", "vcpus", "filters"}:
+            return dom
+
         xml = dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
 
         if diff_keys & {"memory", "vcpus"}:

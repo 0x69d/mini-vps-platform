@@ -8,6 +8,7 @@ import pytest
 
 from mini_vps import cli
 from mini_vps.manager import (
+    PlatformUnsupported,
     ServerConflict,
     ServerNotFound,
     ServerNotRunning,
@@ -309,6 +310,21 @@ def test_create_returns_exit_code_6_when_running(mock_manager, tmp_path):
     )
 
     assert exit_code == 6
+
+
+def test_create_returns_exit_code_8_when_platform_unsupported(
+    mock_manager, tmp_path, capsys
+):
+    mock_manager.create.side_effect = PlatformUnsupported("web-1: filters")
+    spec_file = tmp_path / "vm.yaml"
+    spec_file.write_text(SPEC_YAML)
+
+    exit_code = cli.main(
+        ["create", str(spec_file)], manager_factory=_factory(mock_manager)
+    )
+
+    assert exit_code == 8
+    assert "error: platform unsupported: web-1: filters" in capsys.readouterr().err
 
 
 def test_create_returns_exit_code_1_when_file_missing(mock_manager, tmp_path):

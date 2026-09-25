@@ -1,37 +1,42 @@
 """ストレージプール・volume・ISO・domain XML のリソース生成。"""
 
 import hashlib
+import io
 import logging
-import os
-import subprocess
-import tempfile
+import re
+import socket
 import xml.etree.ElementTree as ET
 
 import libvirt
+import pycdlib
 import yaml
 
 from .config import (
     BALLOON_STATS_PERIOD_SECONDS,
     BASE_POOL,
-    DOMAIN_XML_TEMPLATE,
-    INTERFACE_XML_TEMPLATE,
+    GUEST_AGENT_CHANNEL,
     META_DATA_TEMPLATE,
     NWFILTER_PORT_RULE_TEMPLATE,
     NWFILTER_XML_TEMPLATE,
     OVERLAY_VOL_XML_TEMPLATE,
     POOL_NAME,
-    POOL_XML,
+    POOL_XML_TEMPLATE,
+    QEMU_XML_NS,
     SEED_POOL_NAME,
-    SEED_POOL_XML,
     SEED_VOL_XML_TEMPLATE,
     STATIC_ROUTES_EXEC_LINE_TEMPLATE,
     STATIC_ROUTES_UNIT_NAME,
     STATIC_ROUTES_UNIT_PATH,
     STATIC_ROUTES_UNIT_TEMPLATE,
 )
+from .platform_profile import NETWORK_USER, HostProfile, get_profile
 from .startup_scripts import render_startup_script
 
 _LOGGER = logging.getLogger(__name__)
+
+# resize_domain_xml などで ElementTree が XML を再シリアライズするとき、
+# qemu:commandline の接頭辞を ns0 などに書き換えないようにする。
+ET.register_namespace("qemu", QEMU_XML_NS)
 
 # QEMU/libvirt が自動生成する MAC で慣習的に使う locally-administered なプレフィックス。
 _MAC_PREFIX = "52:54:00"
@@ -115,7 +120,14 @@ def ensure_pool(conn, name, xml) -> libvirt.virStoragePool:
 
 def ensure_seed_pool(conn) -> libvirt.virStoragePool:
     """Seed ISO 用の dir 型ストレージプールが無ければ作成し、アクティブ状態で返す。"""
-    return ensure_pool(conn, SEED_POOL_NAME, SEED_POOL_XML)
+    xml = POOL_XML_TEMPLATE.format(name=SEED_POOL_NAME, path=get_profile().seed_dir)
+    return ensure_pool(conn, SEED_POOL_NAME, xml)
+
+
+def ensure_vps_pool(conn) -> libvirt.virStoragePool:
+    """Overlay volume 用の dir 型プールが無ければ作成し、アクティブ状態で返す。"""
+    xml = POOL_XML_TEMPLATE.format(name=POOL_NAME, path=get_profile().pool_path)
+    return ensure_pool(conn, POOL_NAME, xml)
 
 
 def create_overlay_volume(conn, spec) -> str:
@@ -129,7 +141,7 @@ def create_overlay_volume(conn, spec) -> str:
 
     _LOGGER.debug("%s: base image %s", spec["name"], base_path)
 
-    pool = ensure_pool(conn, POOL_NAME, POOL_XML)
+    pool = ensure_vps_pool(conn)
     vol_name = f"{spec['name']}.qcow2"
 
     if vol_name in {v.name() for v in pool.listAllVolumes()}:
@@ -169,12 +181,24 @@ def _build_static_routes_fragment(spec) -> dict:
     return {"write_files": write_files, "runcmd": runcmd}
 
 
+_GUEST_AGENT_START_CMD = [
+    "sh",
+    "-c",
+    "systemctl enable --now qemu-guest-agent || systemctl start qemu-guest-agent",
+]
+
+
 def _build_user_data(spec, pubkey, secrets: dict[str, str] | None) -> dict:
     """cloud-config の dict(YAML 化前)を組み立てる。
 
-    hostname/users は常に含める。spec["startup_script"] と spec["static_routes"] は
-    それぞれ独立に write_files/runcmd フラグメントを生成し、両方あれば連結する。
-    どちらも無ければ write_files/runcmd キー自体を含めない。
+    hostname/users と qemu-guest-agent の導入は常に含める。spec["startup_script"] と
+    spec["static_routes"] はそれぞれ独立に write_files/runcmd フラグメントを生成し、
+    guest agent の起動コマンドの後ろに連結する。
+
+    qemu-guest-agent は exec(SSH 無しのコマンド実行)とゲストからの IP 取得に使う。
+    Ubuntu の cloud image には入っていないため packages で導入する。Ubuntu の
+    ユニットは udev 起動の static ユニットで enable が失敗しうるため、start に
+    フォールバックする。
     """
     data = {
         "hostname": spec["hostname"],
@@ -188,8 +212,10 @@ def _build_user_data(spec, pubkey, secrets: dict[str, str] | None) -> dict:
         ],
     }
 
+    data["packages"] = ["qemu-guest-agent"]
+
     write_files = []
-    runcmd = []
+    runcmd = [_GUEST_AGENT_START_CMD]
 
     startup_script = spec.get("startup_script")
     if startup_script:
@@ -204,73 +230,108 @@ def _build_user_data(spec, pubkey, secrets: dict[str, str] | None) -> dict:
 
     if write_files:
         data["write_files"] = write_files
-    if runcmd:
-        data["runcmd"] = runcmd
+    data["runcmd"] = runcmd
     return data
 
 
-def build_seed_iso(conn, spec, pubkey, secrets: dict[str, str] | None = None) -> str:
-    """Seed ISO を生成し、seed 用ストレージプールに配置してそのパスを返す。
+def render_seed_files(
+    spec, pubkey, secrets: dict[str, str] | None = None
+) -> dict[str, bytes]:
+    """Seed ISO に入れる cloud-init のファイル群を組み立てる(外部依存ゼロ)。
 
-    user-data と meta-data を一時ファイルに書き出し、cloud-localds で
-    一時ディレクトリ内に {name}-seed.iso を生成したうえで、libvirt の volume API
-    (createXML + upload)で seed 用プールへ配置する。secrets はこの user-data
-    生成にのみ使う。
+    user-data と meta-data は常に含める。静的IPを持つNICが1つでもあれば、全NICを
+    列挙した network-config も含める(無ければ cloud-init の既定の DHCP に任せる)。
+
+    Returns:
+        ファイル名("user-data" など)から中身への dict。secrets を含みうるため、
+        戻り値をログに出してはならない。
     """
     user_data = "#cloud-config\n" + yaml.safe_dump(
         _build_user_data(spec, pubkey, secrets), sort_keys=False
     )
     meta_data = META_DATA_TEMPLATE.format(name=spec["name"], hostname=spec["hostname"])
-    vol_name = f"{spec['name']}-seed.iso"
+    files = {
+        "user-data": user_data.encode(),
+        "meta-data": meta_data.encode(),
+    }
+    if _has_static_network(spec):
+        files["network-config"] = yaml.safe_dump(
+            _build_network_config(spec), sort_keys=False
+        ).encode()
+    return files
 
-    # TemporaryDirectory で囲むことで、cloud-localds が失敗しても
-    # with を抜ける際に一時ファイルが確実に削除される。
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        ud_file_path = os.path.join(tmp_dir, "user-data")
-        md_file_path = os.path.join(tmp_dir, "meta-data")
-        iso_path = os.path.join(tmp_dir, "seed.iso")
-        with open(ud_file_path, "w", encoding="utf-8") as ud_file:
-            ud_file.write(user_data)
-        with open(md_file_path, "w", encoding="utf-8") as md_file:
-            md_file.write(meta_data)
 
-        cmd = ["cloud-localds"]
-        if _has_static_network(spec):
-            # 静的IPが1つでもあれば全NICを列挙したnetwork-configを渡す。無ければ
-            # -N を一切付けず、cmd は従来通り output/user-data/meta-data の3引数。
-            nc_file_path = os.path.join(tmp_dir, "network-config")
-            with open(nc_file_path, "w", encoding="utf-8") as nc_file:
-                nc_file.write(
-                    yaml.safe_dump(_build_network_config(spec), sort_keys=False)
-                )
-            cmd += ["-N", nc_file_path]
-        cmd += [iso_path, ud_file_path, md_file_path]
+def build_seed_iso_bytes(files: dict[str, bytes]) -> bytes:
+    """cloud-init NoCloud の seed ISO(ボリュームラベル cidata)をメモリ上で作る。
 
-        # cmd に載るのは一時ファイルのパスだけで、user-data の中身(secrets を
-        # 含みうる)は載らない。ログに出してよいのはこの引数列までとする。
-        _LOGGER.debug("%s: cloud-localds を実行 %s", spec["name"], cmd)
-        subprocess.run(cmd, check=True)
+    cloud-localds(genisoimage -volid cidata -joliet -rock)と同じ構成を純 Python の
+    pycdlib で作る。Linux の cloud-image-utils に依存しないため macOS でも動く。
+    ISO9660 のファイル名は 8.3 形式に制限されるため、ゲストからは Rock Ridge / Joliet
+    の長いファイル名("user-data" など)で見える。
 
-        pool = ensure_seed_pool(conn)
-        if vol_name in {v.name() for v in pool.listAllVolumes()}:
-            pool.storageVolLookupByName(vol_name).delete(0)
+    Args:
+        files: ファイル名から中身への dict(render_seed_files の戻り値)。
 
-        capacity = os.path.getsize(iso_path)
-        vol = pool.createXML(
-            SEED_VOL_XML_TEMPLATE.format(name=vol_name, capacity_bytes=capacity), 0
+    Returns:
+        ISO イメージのバイト列。
+    """
+    iso = pycdlib.PyCdlib()
+    iso.new(interchange_level=3, joliet=3, rock_ridge="1.09", vol_ident="cidata")
+    for index, (file_name, content) in enumerate(sorted(files.items())):
+        iso.add_fp(
+            io.BytesIO(content),
+            len(content),
+            f"/FILE{index}.;1",
+            rr_name=file_name,
+            joliet_path=f"/{file_name}",
         )
+    out = io.BytesIO()
+    iso.write_fp(out)
+    iso.close()
+    return out.getvalue()
 
-        stream = conn.newStream(0)
-        vol.upload(stream, 0, 0, 0)
-        try:
-            with open(iso_path, "rb") as iso_file:
-                stream.sendAll(lambda st, nbytes, f: f.read(nbytes), iso_file)
-        except Exception:
-            stream.abort()
-            raise
-        stream.finish()
+
+def build_seed_iso(conn, spec, pubkey, secrets: dict[str, str] | None = None) -> str:
+    """Seed ISO を生成し、seed 用ストレージプールに配置してそのパスを返す。
+
+    ISO はメモリ上で作り(build_seed_iso_bytes)、libvirt の volume API
+    (createXML + upload)で seed 用プールへ配置する。一時ファイルを作らないため、
+    secrets を含む user-data がホストのディスクに平文で残る時間が無い。
+    secrets はこの user-data 生成にのみ使う。
+    """
+    files = render_seed_files(spec, pubkey, secrets)
+    iso_bytes = build_seed_iso_bytes(files)
+    vol_name = f"{spec['name']}-seed.iso"
+    # ファイル名だけを出す。中身は secrets を含みうる。
+    _LOGGER.debug("%s: seed ISO を生成 files=%s", spec["name"], sorted(files))
+
+    pool = ensure_seed_pool(conn)
+    if vol_name in {v.name() for v in pool.listAllVolumes()}:
+        pool.storageVolLookupByName(vol_name).delete(0)
+
+    vol = pool.createXML(
+        SEED_VOL_XML_TEMPLATE.format(name=vol_name, capacity_bytes=len(iso_bytes)), 0
+    )
+
+    stream = conn.newStream(0)
+    vol.upload(stream, 0, len(iso_bytes), 0)
+    view = memoryview(iso_bytes)
+    offset = 0
+    try:
+        while offset < len(view):
+            sent = stream.send(view[offset : offset + _UPLOAD_CHUNK].tobytes())
+            if sent <= 0:
+                raise OSError(f"seed ISO の upload が進まない(sent={sent})")
+            offset += sent
+    except Exception:
+        stream.abort()
+        raise
+    stream.finish()
 
     return vol.path()
+
+
+_UPLOAD_CHUNK = 256 * 1024
 
 
 def _filter_name(spec) -> str:
@@ -290,33 +351,179 @@ def build_nwfilter_xml(spec) -> str:
     return NWFILTER_XML_TEMPLATE.format(name=_filter_name(spec), port_rules=port_rules)
 
 
-def build_domain_xml(spec, overlay_path, seed_path, filter_name=None) -> str:
-    """Domain XML 文字列を組み立てて返す。
+def _sub(parent: ET.Element, tag: str, text: str | None = None, **attrs):
+    """属性値が None のものを落として子要素を作る(ElementTree の小さな補助)。"""
+    el = ET.SubElement(parent, tag, {k: v for k, v in attrs.items() if v is not None})
+    if text is not None:
+        el.text = text
+    return el
 
-    spec["networks"] の要素数だけ <interface> を生成する(複数NIC対応)。各NICには
-    (name, index) から決定的に導出したMACを常に埋め込む。
-    filter_name は全 interface に紐づける nwfilter 名。
+
+def build_domain_xml(
+    spec,
+    overlay_path,
+    seed_path,
+    filter_name=None,
+    profile: HostProfile | None = None,
+    ssh_port: int | None = None,
+) -> str:
+    """Domain XML 文字列を ElementTree で組み立てて返す(外部依存ゼロ)。
+
+    domain type・アーキテクチャ・machine・CPU・ネットワーク方式は HostProfile で
+    決まる。libvirt ネットワーク方式では spec["networks"] の要素数だけ <interface>
+    を生成し(複数NIC対応)、各NICには (name, index) から決定的に導出したMACを
+    埋め込む。filter_name は全 interface に紐づける nwfilter 名。
+
+    user-mode ネットワーク方式(macOS)では libvirt のネットワークを使わず、QEMU の
+    -netdev user を qemu:commandline で直接渡し、ゲストの 22 番を
+    127.0.0.1:ssh_port へ転送する。libvirt の <interface type='user'> は slirp
+    バックエンドでポート転送を指定できないため。
+
+    Args:
+        spec: VM スペック。
+        overlay_path: ルートディスク(overlay volume)のパス。
+        seed_path: seed ISO のパス。
+        filter_name: nwfilter 名(None ならフィルタ無し)。
+        profile: HostProfile。None なら get_profile()。
+        ssh_port: user-mode ネットワークで SSH を転送するホストポート。
     """
-    memory_kib = spec["memory"] * 1024
-    filterref = f"<filterref filter='{filter_name}'/>" if filter_name else ""
-    interfaces = "".join(
-        INTERFACE_XML_TEMPLATE.format(
-            network=_network_name(net),
-            mac=_mac_for_interface(spec["name"], index),
-            filterref=filterref,
-        )
-        for index, net in enumerate(spec["networks"])
+    profile = profile or get_profile()
+    root = ET.Element("domain", type=profile.domain_type)
+    _sub(root, "name", spec["name"])
+    _sub(root, "memory", str(spec["memory"] * 1024), unit="KiB")
+    _sub(root, "vcpu", str(spec["vcpus"]))
+    if profile.cpu_mode:
+        _sub(root, "cpu", mode=profile.cpu_mode)
+
+    os_el = _sub(root, "os", firmware="efi")
+    _sub(os_el, "type", "hvm", arch=profile.arch, machine=profile.machine)
+    _sub(os_el, "loader", secure="no")
+    _sub(os_el, "boot", dev="hd")
+
+    features = _sub(root, "features")
+    _sub(features, "acpi")
+    _sub(root, "clock", offset="utc")
+    pm = _sub(root, "pm")
+    _sub(pm, "suspend-to-mem", enabled="no")
+    _sub(pm, "suspend-to-disk", enabled="no")
+
+    devices = _sub(root, "devices")
+    disk = _sub(devices, "disk", type="file", device="disk")
+    _sub(
+        disk,
+        "driver",
+        name="qemu",
+        type="qcow2",
+        discard="unmap",
+        cache=profile.disk_cache,
+        io=profile.disk_io,
     )
-    xml = DOMAIN_XML_TEMPLATE.format(
-        name=spec["name"],
-        memory_kib=memory_kib,
-        vcpus=spec["vcpus"],
-        overlay_path=overlay_path,
-        seed_path=seed_path,
-        interfaces=interfaces,
-        balloon_stats_period=BALLOON_STATS_PERIOD_SECONDS,
-    )
-    return xml
+    _sub(disk, "source", file=overlay_path)
+    _sub(disk, "target", dev="vda", bus="virtio")
+
+    # aarch64 の virt machine には SATA(AHCI)が無いため、seed は読み取り専用の
+    # virtio ディスクとして渡す。cloud-init はデバイス種別ではなくボリュームラベル
+    # (cidata)で seed を見つけるため、どちらでも同じように読まれる。
+    if profile.arch == "aarch64":
+        seed = _sub(devices, "disk", type="file", device="disk")
+        _sub(seed, "driver", name="qemu", type="raw")
+        _sub(seed, "source", file=seed_path)
+        _sub(seed, "target", dev="vdb", bus="virtio")
+    else:
+        seed = _sub(devices, "disk", type="file", device="cdrom")
+        _sub(seed, "driver", name="qemu", type="raw")
+        _sub(seed, "source", file=seed_path)
+        _sub(seed, "target", dev="sda", bus="sata")
+    _sub(seed, "readonly")
+
+    # user-mode では networks == ["default"] であることを planning.check_platform が
+    # 保証済みで、NIC は下の qemu:commandline で1枚だけ作る。
+    networks = spec["networks"]
+    if profile.network_mode != NETWORK_USER:
+        for index, net in enumerate(networks):
+            iface = _sub(devices, "interface", type="network")
+            _sub(iface, "mac", address=_mac_for_interface(spec["name"], index))
+            _sub(iface, "source", network=_network_name(net))
+            _sub(iface, "model", type="virtio")
+            if filter_name:
+                _sub(iface, "filterref", filter=filter_name)
+
+    channel = _sub(devices, "channel", type="unix")
+    _sub(channel, "target", type="virtio", name=GUEST_AGENT_CHANNEL)
+
+    rng = _sub(devices, "rng", model="virtio")
+    _sub(rng, "backend", "/dev/urandom", model="random")
+    balloon = _sub(devices, "memballoon", model="virtio")
+    _sub(balloon, "stats", period=str(BALLOON_STATS_PERIOD_SECONDS))
+    serial = _sub(devices, "serial", type="pty")
+    _sub(serial, "target", port="0")
+    console = _sub(devices, "console", type="pty")
+    _sub(console, "target", type="serial", port="0")
+
+    if profile.network_mode == NETWORK_USER:
+        if ssh_port is None:
+            raise ValueError("user-mode ネットワークには ssh_port が必要です")
+        cmdline = ET.SubElement(root, f"{{{QEMU_XML_NS}}}commandline")
+        mac = _mac_for_interface(spec["name"], 0)
+        for value in (
+            "-netdev",
+            f"user,id={_USER_NETDEV_ID},hostfwd=tcp:127.0.0.1:{ssh_port}-:22",
+            "-device",
+            f"virtio-net-pci,netdev={_USER_NETDEV_ID},mac={mac}",
+        ):
+            ET.SubElement(cmdline, f"{{{QEMU_XML_NS}}}arg", value=value)
+
+    ET.indent(root)
+    return ET.tostring(root, encoding="unicode")
+
+
+_USER_NETDEV_ID = "minivps0"
+_HOSTFWD_SSH_RE = re.compile(r"hostfwd=tcp:127\.0\.0\.1:(\d+)-:22\b")
+
+
+def ssh_forward_port(xml_text: str) -> int | None:
+    """Domain XML から、user-mode ネットワークの SSH 転送ポートを読み取る。
+
+    転送ポートは domain XML(qemu:commandline)そのものが真実源で、metadata には
+    別に持たない。二重に持つと食い違いうるため。
+
+    Returns:
+        ホスト側のポート番号。user-mode ネットワークでなければ None。
+    """
+    root = ET.fromstring(xml_text)
+    for arg in root.iter(f"{{{QEMU_XML_NS}}}arg"):
+        match = _HOSTFWD_SSH_RE.search(arg.get("value", ""))
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _port_is_free(port: int) -> bool:
+    """127.0.0.1 の TCP ポートが今 bind できるかを確かめる。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def allocate_ssh_port(
+    used_ports: set[int], port_range: tuple[int, int], is_free=_port_is_free
+) -> int:
+    """SSH 転送用のホストポートを1つ選ぶ。
+
+    既存 VM に割り当て済み(停止中の VM も含む)のポートと、今ほかのプロセスが
+    使っているポートを避け、範囲の小さい順に最初の空きを返す。
+
+    Raises:
+        RuntimeError: 範囲内に空きが無い場合。
+    """
+    low, high = port_range
+    for port in range(low, high + 1):
+        if port not in used_ports and is_free(port):
+            return port
+    raise RuntimeError(f"SSH 転送用の空きポートがありません(範囲 {low}-{high})")
 
 
 def resize_domain_xml(xml_text: str, memory_kib: int, vcpus: int) -> str:

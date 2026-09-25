@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import mini_vps.api as api_module
 from mini_vps.manager import (
+    PlatformUnsupported,
     ServerConflict,
     ServerNotFound,
     ServerNotRunning,
@@ -102,6 +103,16 @@ def test_put_server_returns_409_when_running(client):
     response = test_client.put("/servers/web-1", json=PUT_BODY)
 
     assert response.status_code == 409
+
+
+def test_put_server_returns_422_when_platform_unsupported(client):
+    test_client, mock_manager = client
+    mock_manager.create.side_effect = PlatformUnsupported("web-1: filters")
+
+    response = test_client.put("/servers/web-1", json=PUT_BODY)
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "platform unsupported: web-1: filters"}
 
 
 def test_put_server_separates_secrets_from_spec_passed_to_manager(client):

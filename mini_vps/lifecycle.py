@@ -6,13 +6,16 @@ import time
 import libvirt
 
 from .config import POOL_NAME, SEED_POOL_NAME
+from .platform_profile import NETWORK_USER, get_profile
 from .resources import (
     _filter_name,
     _network_name,
+    allocate_ssh_port,
     build_domain_xml,
     build_nwfilter_xml,
     build_seed_iso,
     create_overlay_volume,
+    ssh_forward_port,
 )
 from .spec import read_pubkey
 
@@ -20,7 +23,12 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def ensure_network_active(conn, spec) -> None:
-    """VM スペックが参照する networks それぞれについて、非アクティブなら起動する。"""
+    """VM スペックが参照する networks それぞれについて、非アクティブなら起動する。
+
+    user-mode ネットワーク(macOS)では libvirt のネットワークを使わないため何もしない。
+    """
+    if get_profile().network_mode == NETWORK_USER:
+        return
     for network in spec["networks"]:
         name = _network_name(network)
         net = conn.networkLookupByName(name)
@@ -32,11 +40,15 @@ def ensure_network_active(conn, spec) -> None:
 def provision(conn, spec, secrets: dict[str, str] | None = None) -> libvirt.virDomain:
     """VM を定義し、未起動の domain を返す。
 
-    nwfilter(任意) → seed → overlay → domain XML → defineXML の順に処理する。
-    起動前に metadata を付与するため、起動は呼び出し側が行う。seed を overlay
-    より先に作るのは、secrets 不足を安価に検知するため。
+    nwfilter(任意) → seed → overlay → domain XML → defineXML → autostart の順に
+    処理する。起動前に metadata を付与するため、起動は呼び出し側が行う。seed を
+    overlay より先に作るのは、secrets 不足を安価に検知するため。
+
+    user-mode ネットワーク(macOS)では SSH を転送するホストポートをここで割り当て、
+    domain XML に書き込む。
     """
     name = spec["name"]
+    profile = get_profile()
     ensure_network_active(conn, spec)
 
     filter_name = None
@@ -51,10 +63,33 @@ def provision(conn, spec, secrets: dict[str, str] | None = None) -> libvirt.virD
     overlay_path = create_overlay_volume(conn, spec)
     _LOGGER.info("%s: overlay volume を作成 %s", name, overlay_path)
 
-    xml = build_domain_xml(spec, overlay_path, seed_path, filter_name=filter_name)
+    ssh_port = None
+    if profile.network_mode == NETWORK_USER:
+        ssh_port = allocate_ssh_port(used_ssh_ports(conn), profile.ssh_port_range)
+        _LOGGER.info("%s: SSH を 127.0.0.1:%d へ転送", name, ssh_port)
+
+    xml = build_domain_xml(
+        spec,
+        overlay_path,
+        seed_path,
+        filter_name=filter_name,
+        profile=profile,
+        ssh_port=ssh_port,
+    )
     dom = conn.defineXML(xml)
     _LOGGER.info("%s: domain を define", name)
+    dom.setAutostart(1 if spec.get("autostart", True) else 0)
     return dom
+
+
+def used_ssh_ports(conn) -> set[int]:
+    """全 domain(管理外・停止中を含む)に割り当て済みの SSH 転送ポートを集める。"""
+    ports = set()
+    for dom in conn.listAllDomains():
+        port = ssh_forward_port(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        if port is not None:
+            ports.add(port)
+    return ports
 
 
 def _lease_ipv4(dom: libvirt.virDomain) -> str | None:
@@ -109,7 +144,9 @@ def teardown(conn, spec) -> None:
     # undefine 後、かつ domain ブロックとは独立に判定する。provision 内で
     # nwfilterDefineXML だけ成功し以降が失敗したロールバック経路でも回収するため。
     filter_name = _filter_name(spec)
-    if filter_name in {f.name() for f in conn.listAllNWFilters()}:
+    if get_profile().supports_nwfilter and filter_name in {
+        f.name() for f in conn.listAllNWFilters()
+    }:
         conn.nwfilterLookupByName(filter_name).undefine()
         _LOGGER.info("%s: nwfilter %s を削除", name, filter_name)
 
